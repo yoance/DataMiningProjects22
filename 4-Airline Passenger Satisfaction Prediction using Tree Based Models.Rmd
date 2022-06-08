@@ -1,0 +1,488 @@
+---
+title: "Airline Passenger Satisfaction Prediction using Tree Based Models"
+author: "Yohan Chandrasukmana"
+output:
+  pdf_document:
+    number_sections: yes
+    toc: yes
+  html_document:
+    code_folding: show
+    number_sections: yes
+    toc: yes
+    toc_float: yes
+---
+
+Data Source:
+https://www.kaggle.com/datasets/teejmahal20/airline-passenger-satisfaction 
+
+## Libraries and prerequisites
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(ggplot2) # ggplot
+library(reshape2) # melt()
+library(tictoc) # Time: tic(), toc()
+```
+
+
+# Data Loading
+```{r}
+train <- read.csv("C:/Users/chand/OneDrive - Universitas Pelita Harapan/Kuliah/Semester 8/Datmin/Project/Airline Passenger Satisfaction - Dataset/train.csv")
+test <- read.csv("C:/Users/chand/OneDrive - Universitas Pelita Harapan/Kuliah/Semester 8/Datmin/Project/Airline Passenger Satisfaction - Dataset/test.csv")
+```
+
+Since the data has been divided into train and test sets, both datasets will be combined into one data.
+```{r}
+airline <- rbind(train, test)
+# Keeping id column in train and test and which can be used to split the combined data for modelling.
+# train = train[2]
+# test = test[2]
+rm(train, test) # Removing train and test set
+head(airline)
+```
+
+```{r}
+dim(airline)
+```
+The whole data set has 129880 observations (rows) with 25 columns including 22 features and 1 outcome.
+
+
+## Data Description
+`satisfaction`: Passenger's overall satisfaction - Dependent Variable
+`id`: Flight Passenger ID - ID
+
+1. `Gender`: Gender of the passenger's (Female, Male) - Categorical
+2. `Customer Type`: The customers' type based on their loyalty (Loyal customer, Disloyal customer) - Categorical
+3. `Age`: The actual age of the passengers - Numerical
+4. `Type of Travel`: Passenger's purpose of flight (Personal Travel, Business Travel) - Categorical
+5. `Class`: Travel class in the plane of the passengers (Business, Eco, Eco Plus) - Categorical
+6. `Flight distance`: The flight distance of the journey - Numerical
+7. `Inflight wifi service`: Satisfaction level of the in-flight wi-fi service (0:Not Applicable;1-5) - Categorical
+8. `Departure/Arrival time convenient`: Satisfaction level of Departure/Arrival time convenience - Categorical
+9. `Ease of Online booking`: Satisfaction level of online booking - Categorical
+10. `Gate location`: Satisfaction level of gate location - Categorical
+11. `Food and drink`: Satisfaction level of food and drinks - Categorical
+12. `Online boarding`: Satisfaction level of online boarding - Categorical
+13. `Seat comfort`: Satisfaction level of seat comfort - Categorical
+14. `Inflight entertainment`: Satisfaction level of in-flight entertainment - Categorical
+15. `On-board service`: Satisfaction level of on-board service - Categorical
+16. `Leg room service`: Satisfaction level of leg room service - Categorical
+17. `Baggage handling`: Satisfaction level of baggage handling - Categorical
+18. `Check-in service`: Satisfaction level of check-in service - Categorical
+19. `Inflight service`: Satisfaction level of in-flight service - Categorical
+20. `Cleanliness`: Satisfaction level of cleanliness - Categorical
+21. `Departure Delay in Minutes`: Minutes delayed during departure - Numerical
+22. `Arrival Delay in Minutes`: Minutes delayed during Arrival - Numerical
+23. `Satisfaction`: Airline satisfaction level (Satisfaction, neutral or dissatisfaction) - Categorical
+
+# Data Cleaning
+
+```{r}
+# Dropping X (index) variable
+airline = airline[-1]
+```
+
+```{r}
+# Formatting categorical variables as factors
+categorical <- c('Gender', 
+                 'Customer.Type',
+                 'Type.of.Travel',
+                 'Class',
+                 'Inflight.wifi.service',
+                 'Departure.Arrival.time.convenient',
+                 'Ease.of.Online.booking',
+                 'Gate.location',
+                 'Food.and.drink',
+                 'Online.boarding',
+                 'Seat.comfort',
+                 'Inflight.entertainment',
+                 'On.board.service',
+                 'Leg.room.service',
+                 'Baggage.handling',
+                 'Checkin.service',
+                 'Inflight.service',
+                 'Cleanliness',
+                 'satisfaction')
+airline[, categorical] = lapply(airline[, categorical], factor)
+```
+
+```{r}
+# Checking for missing values.
+sapply(airline, function(x) sum(is.na(x)))
+```
+
+Since the missing values are in arrival delay, the missing values will be considered.
+```{r}
+c("Mean" = mean(airline$Arrival.Delay.in.Minutes, na.rm = T), 
+  "Median" = median(airline$Arrival.Delay.in.Minutes, na.rm = T))
+```
+
+From the code above, the mean of the delay is 15 minutes. However, the median is only 0. Since the mean may be subject to outliers, the data will be imputed with the median of the column in the data set.
+
+```{r}
+airline$Arrival.Delay.in.Minutes[is.na(airline$Arrival.Delay.in.Minutes)] <- median(airline$Arrival.Delay.in.Minutes, na.rm = T)
+
+sum(is.na(airline))
+```
+
+```{r}
+summary(airline)
+```
+
+## Independent and Dependent Variables
+For this project, the following variables will be chosen.
+
+* Dependent Variable: `satisfaction`
+* Independent Variables:
+    + Numerical Variables: `Age`, `Flight.distance`, `Departure.Delay.in.Minutes`, `Arrival.Delay.in.Minutes`
+    + Categorical Variables: `Gender`, `Customer.Type`, `Type.of.Travel`, `Class`, `Gate.location`, `Seat.comfort`, `Inflight.service`
+
+```{r}
+numerical <- c('Age', 'Flight.Distance', 'Departure.Delay.in.Minutes', 'Arrival.Delay.in.Minutes')
+categorical <- c('Gender', 'Customer.Type', 'Type.of.Travel', 'Class', 'Gate.location', 'Seat.comfort', 'Inflight.service')
+
+data = airline[,names(airline) %in% c("id", numerical, categorical, "satisfaction")]
+rm(airline)
+```
+
+The dependent and independent variables will be renamed.
+```{r}
+# Renaming Variable Column Names
+names(data) <- c("id", "Gender", "Cust_Type", "Age", "Travel_Type", "Class", "Flight_Dist", "Gate_Loc", "Seat", "Inflight_Svc", "Departure_Delay", "Arrival_Delay", "Satisfaction")
+numerical <- c('Age', 'Flight_Dist', 'Departure_Delay', 'Arrival_Delay')
+categorical <- c('Gender', 'Cust_Type', 'Travel_Type', 'Class', 'Gate_Loc', 'Seat', 'Inflight_Svc')
+
+# Renaming Categ Var Factor Levels
+levels(data$Satisfaction) <- c("Neutral or Dissatisfied", "Satisfied")
+levels(data$Cust_Type) <- c("Disloyal", "Loyal")
+levels(data$Travel_Type) <- c("Business Travel", "Personal Travel")
+
+head(data)
+```
+
+
+# Exploratory Data Analysis
+
+In this part, the dependent and independent variables in the data will be explored through data visualization.
+
+```{r out.width=c('50%', '50%'), fig.show='hold'}
+ggplot(data) + geom_bar(aes(x=Satisfaction, fill=Satisfaction))
+```
+
+It can be observed that the dependent variable is evenly distributed between neutral or dissatisfied and satisfied.
+
+```{r out.width=c('50%', '50%'), fig.show='hold'}
+lapply(categorical, function(x) ggplot(data, aes(Satisfaction, ..count..)) + geom_bar(aes_string(fill=x), position="dodge"))
+```
+
+From the bar plots above, the general distribution of each independent variable in the data with respect to the customer's overall satisfaction. There are more loyal customers than disloyal customers with less customers are satisfied in both types. Customers who travel for business seemed to have a much more overall satisfaction in contrast to customers who travel for personal means who tend to be less satisfied with the flight. The same also holds for customers in Business Class in comparison to Eco and Eco Plus Classes. 
+
+Meanwhile, satisfied customers rated higher in the satisfaction of seat comfort and in-flight service while their perspectives vary with respect to the gate location.
+
+```{r out.width=c('50%', '50%'), fig.show='hold'}
+lapply(numerical, function(x) ggplot(data, aes_string(x=x, fill="Satisfaction"))
+       + geom_histogram(color="black", bins=40, position = "dodge"))
+```
+
+In the numerical variables, it can be observed that their distributions are skewed. This is increasingly apparent especially in the departure and arrival delay of the flights with only a small number of customers experiencing delays. There might be outliers in the data that can be removed in the future. Additionally, the flight distance is right-skewed while the age of the passengers resembles a normal distribution with people aged 20-40 are more likely to be unsatisfied, and people aged 40-60 are more likely to be satisfied.
+
+
+```{r out.width=c('50%', '50%'), fig.show='hold'}
+lapply(numerical, function(y) ggplot(data, aes_string(x="Satisfaction", y=y, fill="Satisfaction"))
+       + geom_boxplot())
+```
+
+The histograms further show the existence of outliers in the data. As previously mentioned, Departure and Arrival Delay might have a number of outliers. A removal of these outliers can be considered in future modelling.
+
+# Train-Test and CV Split
+```{r}
+library(caret) # createDataPartition() and createFolds()
+```
+
+Stratified sampling will be applied in the train-test set split with `createDataPartition()` with a split ratio of 80:20. Folds for cross validation in the train set will be done with `createFolds()` with an amount of 5 folds.
+```{r}
+set.seed(1)
+
+train_idx <- createDataPartition(y=data$Satisfaction, p=0.8, list=F)
+train <- data[train_idx, ]
+test <- data[-train_idx, ]
+
+n.folds <- 5
+folds <- createFolds(y=train$Satisfaction, k=n.folds, list=T, returnTrain=F)
+```
+
+
+# Modelling - Random Forest
+Random Forest model will be created using the `randomForest()` function.
+
+```{r}
+library(randomForest) # randomForest() function
+```
+
+
+## Cross Validation
+Parameter optimization will be done with 5-Fold Cross Validation. The parameters to be tuned include `n.trees` and `mtry`. The n.trees and mtry choices are based on risk of overfitting and computation and memory limitations. 
+
+```{r}
+try_mtry_rf <- c(3, 5, 7, 9)
+try_ntrees_rf <- c(50, 100, 200, 500)
+
+cv_acc_rf <- NULL
+cv_acc_rf <- matrix(nrow = length(try_ntrees_rf), ncol = length(try_mtry_rf))
+rownames(cv_acc_rf) = try_ntrees_rf
+colnames(cv_acc_rf) = try_mtry_rf
+```
+
+```
+# Note: this code will not be run for knitting purposes
+# Results are presented in the next chunk
+tic("RF CV")
+for (n in try_ntrees_rf){
+  acc.ave <- NULL; print(n)
+  for (m in try_mtry_rf){
+    acc <- NULL; print(m); i = 1
+    for(fold in folds){
+      print(i); i=i+1
+      ## Random Forest
+      mod_rf = randomForest(Satisfaction~.-id, data=train[-fold, ],
+                            ntree=n, mtry=m)
+      ## Accuracy in the validation set
+      pred = factor(predict(mod_rf, newdata=train[fold, ], type="response"))
+      acc = c(acc, confusionMatrix(pred, train[fold, ]$Satisfaction,
+                                   positive="Satisfied")$overall["Accuracy"])
+      
+      ## Freeing Memory
+      rm(mod_rf); gc()
+    }
+  acc.ave = c(acc.ave, mean(acc))
+  }
+  cv_acc_rf[paste(n), ] = acc.ave
+}
+toc()
+```
+
+```{r}
+# RF Cross Validation Results ~ time elapsed: 46.23533 mins
+cv_acc_rf["50", ] <- c(0.8808046,0.8770127,0.8755498,0.8744238)
+cv_acc_rf["100", ] <- c(0.8809874,0.8775998,0.8759540,0.8747606)
+cv_acc_rf["200", ] <- c(0.8814398,0.8777730,0.8765796,0.8755402)
+cv_acc_rf["500", ] <- c(0.8814879,0.8785044,0.8766277,0.8756653)
+
+cv_acc_rf = melt(cv_acc_rf)
+cv_acc_rf$Var1 = as.factor(cv_acc_rf$Var1)
+cv_acc_rf$Var2 = as.factor(cv_acc_rf$Var2)
+```
+
+```{r}
+ggplot(melt(cv_acc_rf), aes(x = Var2, y = value)) + 
+  geom_line(aes(color = Var1, group = Var1)) + 
+  geom_point()+
+  ggtitle("Parameter vs Accuracy") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  labs(x = "mtry", y = "Accuracy", color = "ntree")
+```
+
+From the graph above, it can be observed that there is a pattern in which as mtry increases, the accuracy decreases, and vice versa for the ntree parameter. Additionally, the increase from 200 to 500 number of trees does not change much in the accuracy of the model. Theoretically, the ideal amount of variable in each tree split will be around the square root of total independent variables. In this case, it would be the square root of 12 would be around 3.46, which is close to the ideal mtry from the cross validation.
+
+Next, the risk of overfitting should be taken into context when choosing the optimum number of trees for the random forest model. Therefore, since the ntree=50 model's accuracy decrease only around 1.5% in comparison to the ntree=500 model, a better choice for the ntree would be 50 to avoid overfitting from creating too many trees. 
+
+Therefore, parameters mtry=3 and ntree=200 will be chosen as the optimal parameters.
+
+```{r}
+best_mtry_rf = 3
+best_ntree_rf = 50
+```
+
+## Modelling with Tuned Parameters
+
+A model will now be created with optimized parameters obtained from the cross validation.
+```{r}
+tic("RF Best")
+mod_rf_best = randomForest(Satisfaction~.-id, data=train,
+                           ntree=best_ntree_rf, mtry=best_mtry_rf)
+toc()
+```
+
+```{r}
+plot(mod_rf_best)
+```
+
+From the plot above, with more ntrees as previously mentioned, the amount error would not be much less. On the other hand, a simpler model is obtained.
+
+Model's prediction on the train set is as follows.
+```{r}
+yhat = factor(predict(mod_rf_best, newdata=train, type="response"))
+cf_rf = confusionMatrix(yhat, train$Satisfaction, positive="Satisfied")
+cf_rf$overall["Accuracy"]
+```
+
+## Prediction and Model Evaluation
+```{r}
+## Predicting the test set
+pred = factor(predict(mod_rf_best, newdata=test, type="response"))
+cf_rf = confusionMatrix(pred, test$Satisfaction, positive="Satisfied")
+cf_rf$overall["Accuracy"]
+```
+
+```{r}
+(imp_rf <- varImpPlot(mod_rf_best))
+```
+
+It can be seen from the plot above that the three main variables that have a high importance towards the dependent variable include Seat, Travel_Type, and Class. Additionally, arrival and departure Delay, gate location satisfaction, and gender received the lowest variable importance.
+
+
+# Modelling - Gradient Boosting Method
+Gradient Boosting Method (GBM) model will be created using the `gbm()` function.
+
+```{r}
+library(gbm) # gbm() function
+```
+
+
+## Cross Validation
+
+Parameter optimization will be done with 5-Fold Cross Validation. The parameters to be tuned include `n.trees` and `shrinkage` or learning rate of the GBM model. The n.trees and shrinkage choices are based on risk of overfitting and computation and memory limitations. Furthermore, the GBM model will be created using bernoulli distribution as the dependent variable is either neutral or dissatisfied (0), or satisfied (1). The dependent variable in the train and test data will be converted to 0 and 1 for the modelling. The threshold of 0.5 will also be used for classification.
+```{r}
+train_dep_temp <- train$Satisfaction
+test_dep_temp <- test$Satisfaction
+
+# Changing Factor Levels to Numeric for Bernoulli GBM
+train$Satisfaction <- as.numeric(train_dep_temp)-1
+test$Satisfaction <- as.numeric(test_dep_temp)-1
+```
+
+```{r}
+try_shrinkage_gbm = c(0.01, 0.015, 0.02, 0.05)
+try_ntrees_gbm <- c(200, 500, 1000, 2000, 5000, 10000)
+
+cv_acc_gbm <- NULL
+cv_acc_gbm <- matrix(nrow = length(try_ntrees_gbm), ncol = length(try_shrinkage_gbm))
+rownames(cv_acc_gbm) = try_ntrees_gbm
+colnames(cv_acc_gbm) = try_shrinkage_gbm
+```
+
+```
+# Note: this code will not be run for knitting purposes
+# Results are presented in the next chunk
+tic("GBM CV")
+for (n in try_ntrees_gbm){
+  acc.ave <- NULL; print(n)
+    for (s in try_shrinkage_gbm){
+    acc <- NULL; print(s);i=1
+    for(fold in folds){
+      print(i); i=i+1
+      ## GBM
+      mod_gbm = gbm(Satisfaction~.-id, data=train[-fold, names(train)!="Sat_temp"], 
+                     n.trees=n, shrinkage=s, 
+                     distribution="bernoulli", verbose=F)
+      
+      ## Error in the validation set
+      pred = predict(mod_gbm, newdata=train[fold, ], type="response")
+      # print(head(pred))
+      pred = factor(ifelse(pred>0.5, 1, 0))
+      # print(head(pred))
+      
+      acc = c(acc, confusionMatrix(pred, as.factor(train[fold, ]$Satisfaction),
+                                   positive="1")$overall["Accuracy"])
+      
+      ## Freeing Memory
+      rm(mod_gbm); gc()
+    }
+    acc.ave = c(acc.ave, mean(acc));
+  }
+  cv_acc_gbm[paste(n), ] = acc.ave
+}
+toc()
+```
+
+```{r}
+# GBM Cross Validation Results ~ time elapsed: 117.1442 mins
+cv_acc_gbm["200", ] <- c(0.8107214,0.8296232,0.8296232,0.8440594)
+cv_acc_gbm["500", ] <- c(0.8310187,0.8388913,0.8440306,0.8462730)
+cv_acc_gbm["1000", ] <- c(0.8442808,0.8454261,0.8453106,0.8456090)
+cv_acc_gbm["2000", ] <- c(0.8452914,0.8462153,0.8456763,0.8451759)
+cv_acc_gbm["5000", ] <- c(0.8456186,0.8452625,0.8451951,0.8451278)
+cv_acc_gbm["10000", ] <- c(0.845301,0.8451181,0.8451085,0.8447813)
+
+
+cv_acc_gbm = melt(cv_acc_gbm)
+cv_acc_gbm$Var1 = as.factor(cv_acc_gbm$Var1)
+cv_acc_gbm$Var2 = as.factor(cv_acc_gbm$Var2)
+```
+
+```{r}
+ggplot(cv_acc_gbm, aes(x = Var2, y = value)) + 
+  geom_line(aes(color = Var1, group = Var1)) + 
+  geom_point()+
+  ggtitle("Parameter vs Accuracy") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  labs(x = "shrinkage", y = "Accuracy", color = "ntree")
+```
+
+From the graph above, it is apparent that there does not exist the same pattern of parameters just as in the case of parameters in the random forest model. It can be observed that the accuracy converges when shrinkage=0.05 starting from ntree=500. At ntree = 500, the accuracy even exceeds that of models with greater ntree. The plot also shows that a lower learning rate value does not guarantee an increase in accuracy. 
+
+Since an ideal model would be a model with less complexity and high accuracy, the parameters used will be shrinkage=0.05 and ntree=500.
+
+```{r}
+best_shrinkage_gbm = 0.05
+best_ntree_gbm = 500
+```
+
+## Modelling with Tuned Parameters
+
+A model will now be created with optimized parameters obtained from the cross validation.
+```{r}
+tic("GBM Best")
+mod_gbm_best = gbm(Satisfaction~.-id, data=train,
+                   n.trees=best_ntree_gbm, shrinkage=best_shrinkage_gbm,
+                   distribution="bernoulli", verbose=F)
+toc()
+```
+
+Model's prediction on the train set is as follows.
+```{r}
+yhat = predict(mod_gbm_best, newdata=train, type="response")
+yhat = factor(ifelse(yhat>0.5, "Satisfied", "Neutral or Dissatisfied"))
+cf_gbm = confusionMatrix(as.factor(yhat), train_dep_temp, positive="Satisfied")
+cf_gbm$overall["Accuracy"]
+```
+
+
+## Prediction and Model Evaluation
+```{r}
+## Predicting the test set
+pred = predict(mod_gbm_best, newdata=test, type="response")
+pred = factor(ifelse(pred>0.5, "Satisfied", "Neutral or Dissatisfied"))
+cf_gbm = confusionMatrix(as.factor(pred), test_dep_temp, positive="Satisfied")
+cf_gbm$overall["Accuracy"]
+```
+
+```{r}
+(imp_gbm <- summary(mod_gbm_best))
+```
+
+From the variable importance plot, the three main variables that have a high importance towards the dependent variable include Class, Travel_Type, and Seat. Additionally, flight distance, gender, and departure delay received the lowest variable importance. GBM's top variable importance results are similar to that of random forest's. However, the least important variables differ.
+
+
+# Conclusion
+
+The metrics of the model will be compared in the conclusion.
+```{r}
+eval_mod_rf <- c(cf_rf$overall["Accuracy"], cf_rf$byClass["Precision"], 
+                 cf_rf$byClass["Recall"], cf_rf$byClass["F1"])
+eval_mod_gbm <- c(cf_gbm$overall["Accuracy"], cf_gbm$byClass["Precision"], 
+                  cf_gbm$byClass["Recall"], cf_gbm$byClass["F1"])
+eval_df <- data.frame(Mod_RF = eval_mod_rf, Mod_GBM = eval_mod_gbm)
+eval_df
+```
+
+From the results above, the random forest model received a higher score in both accuracy and F1 score in comparison to the gradient boosted model. Therefore, it can be inferred that the random forest model is more accurate than the GBM model and has better ability in detecting true positives in matters of precision and recall.
+
+
+## Insights
+
+The two models created have performed quite well. It has also been shown the importance of the independent variables towards a customer's satisfaction. The flight seat and the passenger's class and means of travel highly impact the passenger's overall satisfaction, which are also according to the results in the data exploration. Therefore, airline companies should consider optimizing their flight seats for the passengers. Furthermore, this certain airline company should prioritize their target market on company executives, employees, and government officials who most likely travel abroad for business purposes by offering business class flights.
+
+For further studies, modelling can be done with more computation power and RAM of more than 8 gigabytes to cross validate the model with more parameters such as depth of trees and more options in the number of tree generated. The outliers in the delay variable can be considered to be removed in future models.

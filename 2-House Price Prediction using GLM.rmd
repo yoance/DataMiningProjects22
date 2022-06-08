@@ -1,0 +1,506 @@
+---
+title: "House Price Prediction Project - GLM"
+author: "Yohan Chandrasukmana"
+output:
+  pdf_document:
+    toc: yes
+  html_document:
+    code_folding: show
+    number_sections: yes
+    toc: yes
+    toc_float: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Loading Library
+Library used in this study case are as follows.
+```{r, echo=TRUE}
+library(tidyverse)
+library(caret) # for splitting train-test set
+library(ggpubr) # for arranging ggplot
+library(car) # for calculating vif
+```
+
+# Data Description
+Data used in this study case are house sales data.
+
+## Data Loading and Prerequisites
+Data saved in the CSV files will be loaded using the function `read.csv`. A seed will also be set for the project so that we will obtain the same results in each run.
+```{r, echo=TRUE}
+rm(list=ls())   # clean up workspace
+set.seed(1)
+sales <- read.csv('salesData19.csv')
+head(sales)
+```
+
+# Data Cleanup
+First, the data set will be cleaned.
+```{r}
+# Checking for missing values & removing them
+table(is.na(sales))
+sales = na.omit(sales)
+
+# Data summary
+summary(sales)
+
+# Dropping ID variable since we have the same values in the data frame's index
+sales <- subset(sales, select = -c(ID))
+
+# Changing SALEDT variable into date format in R and renaming the column
+sales$SALEDT <- as.Date(sales$SALEDT)
+names(sales)[names(sales) == 'SALEDT'] <- 'DATE'
+
+# Formatting categorical variables as factors
+categorical <- c('City', 
+                 'Province', 
+                 'BSMT',
+                 'HEATSYS',
+                 'ATTIC',
+                 'GRADE',
+                 'Style')
+sales[, categorical] = lapply(sales[, categorical], factor)
+```
+
+# Exploratory Data Analysis
+We shall now explore the data set.
+The dependent variable in this study case is `Price`. We will analyze its distribution and check for outliers in the data.
+```{r, echo=TRUE}
+summary(sales$Price)
+ggplot(sales) + geom_histogram(aes(x = Price))
+ks.test(sales$Price, "pnorm")
+```
+
+From the histogram, we can see that the data is strongly skewed and not normally distributed. With a p-value of 2.2*10^(-6), we also obtain the same conclusion that the data is not from a normal distribution from the Kolmogorov-Smirnov test.
+
+Now, we are going to analyze outliers that might exist in the dependent variable.
+```{r, echo=TRUE}
+ggplot(sales) + geom_boxplot(aes(y = Price))
+```
+
+Here, we can conclude that we have outliers present in the response variable. This might be the reason why the distribution of the data is strongly skewed. As these outliers might affect our models, we will remove them. 
+An entry of the data is considered as an outlier with the following formula: 
+`outliers = 3*Interquartile Range / 1.5`.
+```{r}
+# Total number of outliers:
+paste("outliers:", length(boxplot.stats(sales$Price, coef = 3)$out))
+out = boxplot.stats(sales$Price, coef = 3)$out
+out_key = which(sales$Price %in% c(out))
+sales = sales[-out_key, ]
+
+# Checking the boxplot of the data with removed outliers
+ggplot(sales) + geom_boxplot(aes(y = Price))
+ggplot(sales) + geom_histogram(aes(x = Price))
+```
+
+We can see that the boxplot is now slightly better and the histogram of the prices is also less skewed.
+
+After analyzing the response variable, we can now analyze the independent variables, which include `SQFT, FLR1AREA, SFLA, EFF_AGE, GRADE`.
+```{r}
+table(sales$GRADE)
+summary(sales$SQFT)
+summary(sales$FLR1AREA)
+summary(sales$SFLA)
+
+min(sales$SQFT)
+# Since it is impossible to have a house with 0 square feet, we will remove them.
+sales = sales[sales$SQFT != 0,]
+```
+
+We will now see the correlation between the dependent variable and the numeric independent variables.
+```{r}
+cor(sales$Price, sales$SQFT)
+cor(sales$Price, sales$FLR1AREA)
+cor(sales$Price, sales$SFLA)
+```
+
+We can see that the relationship between `Price` and `SQFT` is not significant, while the results also show that there is a moderate correlation between `Price` and `FLR1AREA`. On the other hand, we can see that the correlation of the `SFLA` variable is significant. Therefore, we can assume that `SFLA` will be significant in our models as well.
+
+We will now compare the correlation between the variables with scatterplots and box plot for the categorical independent variable.
+```{r}
+ggarrange(
+  ggplot(sales) + geom_boxplot(aes(GRADE, Price)),
+  ggplot(sales) + geom_point(aes(SQFT, Price)),
+  ggplot(sales) + geom_point(aes(FLR1AREA, Price)),
+  ggplot(sales) + geom_point(aes(SFLA, Price)))
+```
+
+From the plots, we can conclude the same conclusion as before based on the correlation coefficients, such as the relationship between `SQFT` and `Price` which shows almost no correlation between the two. Additionally, we can see that the average price of the houses decreases with the `GRADE`. We can also observe the existence of some outliers in each category, one of them being a data point that is far on top in Category 'E'.
+
+
+# Train Test Splitting
+We are now ready to split the data set into train and test set. The splitting will be done using `CreateDataPartition` function from the `caret` package. The train-test split ratio will be 80:20 and stratified splitting will be done based on `GRADE` as it is the categorical independent variable which will be modeled in the GLM Model.
+```{r, echo=TRUE}
+train.idx <- createDataPartition(y = sales$GRADE, p = 0.8, list = FALSE)
+train <- sales[train.idx, ]
+test <- sales[-train.idx, ]
+
+# Checking the proportion of the GRADE categorical variable
+# in the train and test set in comparison to the original data set
+rbind("Data Set" = table(sales$GRADE),
+      "Train" = table(train$GRADE),
+      "Test" = table(test$GRADE))
+rbind("Data Set" = prop.table(table(sales$GRADE)),
+      "Train" = prop.table(table(train$GRADE)),
+      "Test" = prop.table(table(test$GRADE)))
+```
+
+We can see that all categories in `GRADE` exist in both train and test set with a similar proportion to the original data.
+
+
+# Generalized Linear Model (GLM)
+Before we start our GLM modelling, we must first choose a distribution that is suitable to the dependent variable.
+```{r}
+# Checking the distribution of the dependent variable Price by plotting its histogram
+qqnorm(sales$Price,main="QQ plot")
+qqline(sales$Price)
+```
+
+In addition to the previous normality test with Kolmogorov-Smirnov, we can see through the QQ plot that the data is skewed and is not normally distributed. Therefore, we will attempt to create models based on other distributions, other than the normal/gaussian distribution.
+
+## GLM - Choosing Models
+There are a couple of family distributions provided in the R distribution, which include the following.
+
+1. Gaussian
+2. Gamma
+3. Binomial
+4. Poisson
+5. Inverse Gaussian
+
+The distributions which we will use is the gaussian, gamma, and inverse gaussian family distributions. 
+
+We can still use the gaussian distribution as it is the usual multiple linear regression model and that the outcome variable is also continuous. Even though our dependent variable is not normally distributed, fitting a normal multiple linear regression is still useful for comparison with other models.
+
+Then, since the outcome, `Price`, is skewed and always positive, it can be modeled using the gamma distribution. The values are always positive, not only because of the given data, but the sale price of a house is not negative.
+
+As previously mentioned, since the `Price` data is positive, could be assumed as continuous, and has a positively skewed distribution, then the data can be fit into the inverse gaussian distribution which is a family of distribution that includes positive and continuous values with a positively skewed distribution.
+
+On the other hand, the binomial distribution glm is unsuitable since our outcome is not categorical nor a binary outcome. In other words, the value of Prices must be between 0 or 1. We also do not attempt to fit the data into the poisson distribution glm as it is suited for count values; prices are not count outcomes and not discrete.
+
+## Modelling Preparation
+We will now create GLM models with different distributions and find the most suitable model for our data. Once again, the independent variables are as follows:
+
+Independent variables: SQFT, FLR1AREA, SFLA, EFF_AGE, GRADE
+```{r}
+# Preparing outcome and independent variables for the models
+# We also transform the outcome with logarithm transformation.
+outcome <- "log(Price)"
+variables <- c("SQFT", "FLR1AREA", "SFLA", "EFF_AGE", "GRADE")
+f <- as.formula(paste(outcome, 
+                      paste(variables, collapse = "+"),
+                      sep = "~"))
+f
+
+par(mfrow=c(1,2))
+hist(sales$Price)
+hist(log(sales$Price))
+```
+
+By transforming the response variable with the logarithm function, we can see that the range of data values become smaller and the distribution of the data becomes less skewed, although it does not completely resemble a normal distribution. This transformation allows a better outcome during model fitting.
+
+## Model Evaluation Functions
+To analyze and evaluate our models, we will use the following functions.
+```{r}
+options(scipen=999) # Disable Scientific Notation
+
+# Plot relationships between Log Sale Price, Prediction, and Residuals
+# Function also returns a bin which contains indices of extreme residual data
+eval.train_init <- function(model, train, outliers){
+  zresid = data.frame(x=rstandard(model))
+  title = ifelse(outliers == TRUE, "Outliers not Removed", "Outliers Removed")
+
+  print(ggarrange(
+    ggplot() + geom_point(aes(x=model$fitted.values, y=log(train$Price))) +
+      geom_abline(aes(intercept = 0, slope = 1), colour = "blue") +
+      ggtitle(paste("Log SalePrice vs Prediction - Training Set,", title)) +
+      theme(plot.title = element_text(hjust = 0.5)) +
+      labs(x = "Prediction on Train Data", y ="Log Sales Price"),
+    ggplot() + geom_point(aes(x=model$fitted.values, y=zresid$x)) +
+      geom_abline(aes(intercept = 0, slope = 0), colour = "blue") +
+      ggtitle(paste("Residual vs Prediction - Training Set,", title)) +
+      theme(plot.title = element_text(hjust = 0.5)) +
+      labs(x = "Prediction on Train Data", y ="Residual"),
+    nrow = 2, align = "v"))
+  
+  if(outliers == TRUE){
+    bin = which(abs(zresid)>3)
+    return(bin)
+  }
+}
+
+# Updates train data by removing residuals in the model.
+eval.train_update <- function(model, train, bin){
+  if(length(bin)>0) {
+    train.outliers = train
+    train.outliers$outliers = 0
+    train.outliers$outliers[bin] = 1
+    train.outliers$pred = model$fitted.values
+    train.outliers$pred.dollar = exp(train.outliers$pred)
+    train.2 = train[-bin,]
+  } else {
+    train.2 = train
+  }
+  
+  return(train.2)
+}
+
+# Compare predicted and observed data
+# Function returns a list of metrics used for comparison
+comp <- function(pred, obs){
+  n = length(obs)
+  rsq = cor(pred,obs)^2
+  mse = sum((pred - obs)^2)/n
+  semse = sd((pred - obs)^2) / sqrt(n)
+  rmse = sqrt(mse)
+  se = sd(pred-obs) / sqrt(n)
+  mae = sum(abs(pred-obs))/n
+  mape = sum(abs(pred-obs)/obs)/n*100
+  return(list("n"=n,"R2"=rsq,"MSE"=mse,"SEMSE"=semse,"RMSE"=rmse,"SE"=se,"MAE"=mae,"MAPE"=mape))
+}
+
+# Plot relationships between Log Sale Price and Prediction in the test set
+# Function also returns the comp function for predictions in the test set
+eval.test <- function(pred, obs){
+  print(
+    ggplot() + geom_point(aes(x=pred, y=log(obs))) +
+        geom_abline(aes(intercept = 0, slope = 1), colour = "blue") +
+        ggtitle("Log SalePrice vs Prediction - Testing Set") +
+        theme(plot.title = element_text(hjust = 0.5)) +
+        labs(x = "Prediction on Test Data", y ="Log Sales Price"))
+  
+  comp.test = comp(pred, log(obs))
+  print(comp.test)
+  return(comp.test)
+}
+```
+
+
+# Gaussian Distribution GLM (Normal LM)
+```{r, echo=TRUE}
+mod.gaussian <- glm(f, data = train, family = gaussian)
+summary(mod.gaussian)
+```
+
+## Model Evaluation 1 - AIC & Residual Analysis
+```{r, echo=TRUE}
+mod.gaussian$aic
+bin.gaussian = eval.train_init(mod.gaussian, train, outliers = TRUE)
+train.gaussian = eval.train_update(mod.gaussian, train, bin.gaussian)
+```
+In the model's summary, that the model received an AIC value of 25245.23, which will be used to compare with the next model with removed outliers in the train set.
+
+From the graph above, we can see from the first graph that the predictions made by the model are spread around the y=x line, which shows that the predictions are close to the actual values. However, we can see that there are a couple of wrong predictions. The second graph highlights these wrong outcomes as we can see that there are some residuals that are far from the predictions. Residuals are the difference between each predicted data and the actual value of the data.  Data considered as residuals were evaluated by the `rstandard()` function and values that are greater than 3 will be removed in the following step.
+
+## Remodelling With New Train Set
+```{r, echo=TRUE}
+mod.gaussian.final <- glm(f, data = train.gaussian, family = gaussian)
+summary(mod.gaussian.final)
+```
+
+## Model Evaluation 2 - New AIC, Residual Analysis, and Error Analysis
+```{r, echo=TRUE}
+data.frame("Outliers Not Removed" = mod.gaussian$aic, 
+           "Outliers Removed" = mod.gaussian.final$aic)
+
+eval.train_init(mod.gaussian.final, train.gaussian, outliers = FALSE)
+```
+
+After we have removed the outliers in the training set, we can see that there is a significant decrease in the AIC of the model. This means that the model is now performing better with outliers removed.
+
+From the graphs, we can now see that the predictions are now closer the actual values and the residuals are also closer to 0. It is also worth noting that there are no significant patterns present in the residuals vs prediction plot; the residuals are randomly distributed.
+
+Now, we are going to analyze the error in the predictions of the train set. We will also compare the metrics with the previous model with outliers not removed.
+```{r}
+merge(stack(comp(mod.gaussian$fitted.values, mod.gaussian$y)),
+      stack(comp(mod.gaussian.final$fitted.values, mod.gaussian.final$y)),
+      by = "ind", sort = FALSE)
+```
+
+From the results, we can conclude that out of the 23016 data in the train set with outliers removed, the model receives an RMSE of 0.3594 and an average absolute error of 2.282%. These values show an increase in performance from the previous model with outliers intact. This can be concluded from the lower RMSE and MAPE values.
+
+## Multicollinearity
+```{r}
+vif(mod.gaussian.final)
+```
+
+From the VIF scores, we can see that all of them have a relatively small VIF with values below 4. Therefore, we can conclude that each independent variable is not a linear combination of other independent variables. In other words, it is unlikely that there exists a relationship between the independent variables.
+
+## Prediction and Error Analysis
+```{r}
+test.gaussian = test
+test.gaussian$prediction = predict(mod.gaussian.final, newdata = test.gaussian, type = "response")
+```
+
+```{r}
+error.gaussian = eval.test(test.gaussian$prediction, test.gaussian$Price)
+```
+
+From the graph, we can see that there are still a lot of predictions that are far away from the y=x line, which means that the model has some inaccurate predictions in the test set.
+
+From the results, we can conclude that out of the 5837 data in the test set, the model successfully predicted the prices with RMSE of 0.4147 and average absolute error of 2.481%. These metrics and the model's AIC will be kept for further comparison with the results from other models.
+
+
+# Gamma Distribution GLM
+```{r, echo=TRUE}
+# Comparing 2 Link Functions of Gamma Family
+mod.gamma.inv <- glm(f, data = train, family = Gamma)
+mod.gamma.ide <- glm(f, data = train, family = Gamma(link = "identity"))
+
+c("Inverse" = mod.gamma.inv$aic, "Identity" = mod.gamma.ide$aic)
+
+# The chosen link function is identity as the fitted model receives a smaller AIC in comparison with the default link function, inverse.
+mod.gamma <- mod.gamma.ide
+summary(mod.gamma)
+```
+
+## Model Evaluation 1 - AIC & Residual Analysis
+```{r, echo=TRUE}
+mod.gamma$aic
+bin.gamma = eval.train_init(mod.gamma, train, outliers = TRUE)
+train.gamma = eval.train_update(mod.gamma, train, bin.gamma)
+```
+
+In the model's summary, the model received an AIC value of 26775.78, which will be used to compare with the next model with removed outliers in the train set.
+
+From the graph above, we can see that from the first graph, the predictions made by the model are spread around the y=x line, which shows that the predictions are close to the actual values. However, we can see that there are a couple of wrong predictions. The second graph highlights these wrong outcomes as we can see that there are some residuals that are far from the predictions. Residuals were processed and removed the same way as before in the previous model.
+
+## Remodelling With New Train Set
+```{r, echo=TRUE}
+mod.gamma.final <- glm(f, data = train.gamma, family = Gamma(link = "identity"))
+summary(mod.gamma.final)
+```
+
+## Model Evaluation 2 - New AIC, Residual Analysis, and Error Analysis
+```{r, echo=TRUE}
+data.frame("Outliers Not Removed" = mod.gamma$aic, 
+           "Outliers Removed" = mod.gamma.final$aic)
+
+eval.train_init(mod.gamma.final, train.gamma, outliers = FALSE)
+```
+
+Just as we have also previously concluded in the previous model, we can see that there is a significant decrease in the AIC of the model after removing the residuals in the training set. This means that the model is now performing better with the outliers removed.
+
+From the graphs, we can now see that the predictions are now closer the actual values and the residuals are also closer to 0 as well. It is also worth noting that there are no significant patterns present in the residuals vs prediction plot; the residuals are randomly distributed.
+
+Now, we are going to analyze the error in the predictions of the train set.
+```{r}
+merge(stack(comp(mod.gamma$fitted.values, mod.gamma$y)),
+      stack(comp(mod.gamma.final$fitted.values, mod.gamma.final$y)),
+      by = "ind", sort = FALSE)
+```
+
+From the results, we can conclude that out of the 22965 data in the train set with outliers removed, the model's predictions receive an RMSE of 0.3556 and an average absolute error of 2.262%. These values show an increase in performance from the previous model with outliers intact. This can be concluded from the lower RMSE and MAPE values.
+
+## Multicollinearity
+```{r}
+vif(mod.gamma.final)
+```
+
+From the VIF scores, we can see that all of them have a relatively small VIF with values below 4. Therefore, we can conclude that each independent variable is not a linear combination of other independent variables. In other words, it is unlikely that there exists a relationship between the independent variables.
+
+## Prediction and Error Analysis
+```{r}
+test.gamma = test
+test.gamma$prediction = predict(mod.gamma.final, newdata = test.gamma, type = "response")
+```
+
+```{r}
+error.gamma = eval.test(test.gamma$prediction, test.gamma$Price)
+```
+
+From the results, we can conclude that out of the 5837 data in the test set, the model has predicted with RMSE of 0.4149 and average absolute error of 2.482%. These metrics will be kept for further comparison with the results from other models.
+
+
+# Inverse Gaussian Distribution GLM
+```{r, echo=TRUE}
+# Comparing 2 Link Functions of Inverse Gaussian Family
+mod.inv.gsn.mu2 <- glm(f, data = train, family = inverse.gaussian)
+mod.inv.gsn.ide <- glm(f, data = train, family = inverse.gaussian(link = "identity"))
+
+c("1/mu^2" = mod.inv.gsn.mu2$aic, "Identity" = mod.inv.gsn.ide$aic)
+
+# The chosen link function is identity as the fitted model receives a smaller AIC in comparison with the default link function, 1/mu^2.
+mod.inv.gsn <- mod.inv.gsn.ide
+summary(mod.inv.gsn)
+```
+
+## Model Evaluation 1 - AIC & Residual Analysis
+```{r, echo=TRUE}
+mod.inv.gsn$aic
+bin.inv.gsn = eval.train_init(mod.inv.gsn, train, outliers = TRUE)
+train.inv.gsn = eval.train_update(mod.inv.gsn, train, bin.inv.gsn)
+```
+
+In the model's summary, the model received an AIC value of 27701.45, which will be used to compare with the next model with removed outliers in the train set.
+
+From the graph above, we can see that from the first graph, the predictions made by the model are spread around the y=x line, which shows that the predictions are close to the actual values. However, we can see that there are a couple of wrong predictions. The second graph highlights these wrong outcomes as we can see that there are some residuals that are far from the predictions. Residuals were processed and removed the same way as before in the previous model.
+
+## Remodelling With New Train Set
+```{r, echo=TRUE}
+mod.inv.gsn.final <- glm(f, data = train.inv.gsn, family = Gamma(link = "identity"))
+summary(mod.inv.gsn.final)
+```
+
+## Model Evaluation 2 - New AIC, Residual Analysis, and Error Analysis
+```{r, echo=TRUE}
+data.frame("Outliers Not Removed" = mod.inv.gsn$aic, 
+           "Outliers Removed" = mod.inv.gsn.final$aic)
+
+eval.train_init(mod.inv.gsn.final, train.inv.gsn, outliers = FALSE)
+```
+
+Just as we have also previously concluded in the 2 previous models, we can conclude that there is a significant decrease in the AIC of the model after removing the outliers in the training set. This means that the model is now performing better with the outliers removed.
+
+From the graphs, we can now see that the predictions are now closer the actual values and the residuals are also closer to 0 as well. It is also worth noting that there are no significant patterns present in the residuals vs prediction plot; the residuals are randomly distributed.
+
+Now, we are going to analyze the error in the predictions of the train set.
+```{r}
+merge(stack(comp(mod.inv.gsn$fitted.values, mod.inv.gsn$y)),
+      stack(comp(mod.inv.gsn.final$fitted.values, mod.inv.gsn.final$y)),
+      by = "ind", sort = FALSE)
+```
+
+From the results, we can conclude that out of the 22954 data in the train set with outliers removed, the model's predictions receive an RMSE of 0.3550 and an average absolute error of 2.258%. These values show an increase in performance from the previous model with outliers intact. This can be concluded from the lower RMSE and MAPE values.
+
+## Multicollinearity
+```{r}
+vif(mod.inv.gsn.final)
+```
+
+From the VIF scores, we can see that all of them have a relatively small VIF with values below 4. Therefore, we can conclude that each independent variable is not a linear combination of other independent variables. In other words, it is unlikely that there exists a relationship between the independent variables.
+
+## Prediction and Error Analysis
+```{r}
+test.inv.gsn = test
+test.inv.gsn$prediction = predict(mod.inv.gsn.final, newdata = test.inv.gsn, type = "response")
+```
+
+```{r}
+error.inv.gsn = eval.test(test.inv.gsn$prediction, test.inv.gsn$Price)
+```
+
+From the results, we can conclude that out of the 5837 data in the test set, the model has predicted with RMSE of 0.4150 and average absolute error of 2.483%. These metrics will be kept for further comparison with the results from other models.
+
+
+# Comparison and Conclusion
+After creating 3 models with the gaussian, gamma, and inverse gaussian distribution, we are now going to compare the performance of the models using the computed metrics.
+```{r}
+comp.aic <- data.frame("Metric" = "AIC",
+                      "Gaussian" = mod.gaussian.final$aic,
+                      "Gamma" = mod.gamma.final$aic,
+                      "Inverse Gaussian" = mod.inv.gsn.final$aic)
+comp.error <- merge(stack(error.gaussian), stack(error.gamma), by="ind", sort = FALSE)
+comp.error <- merge(comp.error, stack(error.inv.gsn), by="ind", sort = FALSE)
+names(comp.error) <- names(comp.aic)
+comp.df <- rbind(comp.aic, comp.error)
+
+comp.df
+```
+
+From the results above, we can see that the AIC of the gaussian glm is lower than that of gamma glm's and inverse gaussian glm's. This indicates that there are more residues in the gamma and inverse gaussian glm which in turn affects the fitted values which affects the AIC value. Therefore, we can conclude that the gaussian glm is slightly a better model in terms of fitted values and its residues.
+
+Similar conclusions can also be taken by evaluating other metrics, such as RMSE and MAPE. The gaussian glm outperforms the gamma and inverse gaussian glm in both metrics: the RMSE is smaller by 0.000228761 and 0.0003115 consecutively while the MAPE is smaller by 0.00124635% and 0.002350234%. This means that the square root of the average of the squared error and the average absolute percentage of error in the prediction of gaussian glm is slightly less than the values obtained from the gamma and inverse gaussian model. Therefore, the gaussian glm is more accurate than gamma glm and inverse gaussian glm. In addition, the gamma glm also outperforms the inverse gaussian in both of the metrics discussed. 
+
+Therefore, it can be concluded that even though the `Prices` data is skewed, we can still fit the data into a gaussian glm or the regular multiple linear model. In this case, the gaussian glm is the best model for fitting the data with the highest accuracy, followed by the gamma and inverse gaussian glm. Although, it is worth noting that the difference between the evaluating metrics are fairly small.

@@ -1,0 +1,614 @@
+---
+title: "House Price Prediction Project - GAM"
+author: "Yohan Chandrasukmana"
+output:
+  html_document:
+    code_folding: show
+    number_sections: yes
+    toc: yes
+    toc_float: yes
+  pdf_document:
+    number_sections: yes
+    toc: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Loading Library
+Library used in this study case are as follows.
+```{r, echo=TRUE}
+library(tidyverse)
+library(caret) # for splitting train-test set
+library(ggpubr) # for arranging ggplot
+library(gam) # for GAM
+library(car) # for calculating collinearity with vif
+```
+
+
+
+******
+
+# Data Description
+Data used in this study case are house sales data.
+
+## Data Loading and Prerequisites
+Data saved in the CSV files will be loaded using the function `read.csv`. A seed will also be set for the project so that we will obtain the same results in each run.
+```{r, echo=TRUE}
+rm(list=ls())   # clean up workspace
+set.seed(1)
+sales <- read.csv('salesData19.csv')
+head(sales)
+```
+
+
+
+******
+
+# Data Cleanup
+First, the data set will be cleaned.
+```{r}
+# Checking for missing values & removing them
+table(is.na(sales))
+sales = na.omit(sales)
+
+# Data summary
+summary(sales)
+
+# Dropping ID variable since we have the same values in the data frame's index
+sales <- subset(sales, select = -c(ID))
+
+# Changing SALEDT variable into date format in R and renaming the column
+sales$SALEDT <- as.Date(sales$SALEDT)
+names(sales)[names(sales) == 'SALEDT'] <- 'DATE'
+
+# Formatting categorical variables as factors
+categorical <- c('City', 
+                 'Province', 
+                 'BSMT',
+                 'HEATSYS',
+                 'ATTIC',
+                 'GRADE',
+                 'Style')
+sales[, categorical] = lapply(sales[, categorical], factor)
+```
+
+
+
+******
+
+# Exploratory Data Analysis
+We shall now explore the data set.
+
+In this project, the variables will be divided as follows.
+
+* Dependent Variable: `Price`
+* Independent Variables:
+    + Numerical Variables: `SQFT`, `FLR1AREA`, `SFLA`, `EFF_AGE`
+    + Categorical Variables: `City`, `Province`, `BSMT`, `ATTIC`, `GRADE`, `Style`
+    + Numerical/Categorical Variables: `RMTOT`, `RMBED`, `BATH`
+
+Furthermore, the Numerical/Categorical variables will be treated as numerical variables. This is to fit future data that might not be classified into the specified categories, but could be defined as in between of categories. For example, a house has 2 bathrooms an additional small bathroom. It is unjust to classify the house to have 2 or 3 values in the `BATH` variable. Instead, the house could be given a value of 2.5.
+
+The independent variables will be kept into variables for this project.
+```{r}
+var.num <- c("RMTOT", "RMBED", "BATH", "SQFT", "FLR1AREA", "SFLA", "EFF_AGE")
+var.categ <- c("City", "Province", "BSMT", "ATTIC", "GRADE", "Style")
+```
+
+We will analyze the distribution of the `Price` variable and check for outliers in the data.
+```{r, echo=TRUE}
+summary(sales$Price)
+ggplot(sales) + geom_histogram(aes(x = Price))
+ks.test(sales$Price, "pnorm")
+```
+
+From the histogram, we can see that the data is strongly skewed and not normally distributed. With a p-value of 2.2*10^(-6), we also obtain the same conclusion that the data is not from a normal distribution from the Kolmogorov-Smirnov test.
+```{r}
+# Checking the distribution of the dependent variable Price by plotting its histogram
+qqnorm(sales$Price,main="QQ plot")
+qqline(sales$Price)
+```
+
+In addition to the previous normality test with Kolmogorov-Smirnov, we can see through the QQ plot that the data is skewed and is not normally distributed.
+
+Now, we are going to analyze outliers that might exist in the dependent variable.
+```{r, echo=TRUE}
+ggplot(sales) + geom_boxplot(aes(y = Price))
+```
+
+Here, we can conclude that we have outliers present in the response variable. This might be the reason why the distribution of the data is strongly skewed. As these outliers might affect our models, we will remove them. 
+An entry of the data is considered as an outlier with the following formula: 
+$$
+ outliers = 3*Interquartile Range / 1.5
+$$
+
+```{r}
+# Total number of outliers:
+paste("outliers:", length(boxplot.stats(sales$Price, coef = 3)$out))
+out = boxplot.stats(sales$Price, coef = 3)$out
+out_key = which(sales$Price %in% c(out))
+sales = sales[-out_key, ]
+
+# Checking the boxplot of the data with removed outliers
+ggplot(sales) + geom_boxplot(aes(y = Price))
+ggplot(sales) + geom_histogram(aes(x = Price))
+```
+
+We can see that the boxplot is now slightly better and the histogram of the prices is also less skewed.
+
+After analyzing the response variable, we can now analyze the independent variables, which include `City`, `Province`, `SQFT`, `RMTOT`, `RMBED`, `BATH`, `FLR1AREA`, `BSMT`, `ATTIC`, `SFLA`, `GRADE`, `EFF_AGE`, `Style`.
+```{r}
+summary(sales$City)
+summary(sales$Province)
+summary(sales$SQFT)
+summary(sales$RMTOT)
+summary(sales$RMBED)
+summary(sales$BATH)
+summary(sales$FLR1AREA)
+summary(sales$BSMT)
+summary(sales$ATTIC)
+summary(sales$SFLA)
+summary(sales$GRADE)
+summary(sales$EFF_AGE)
+summary(sales$Style)
+```
+
+From the EDA, it can be concluded that there are some findings that could be highlighted and more data cleaning could be done towards their implications.
+```{r}
+min(sales$SQFT)
+# Since it is impossible to have a house with 0 square feet, we will remove them.
+sales = sales[sales$SQFT != 0,]
+```
+
+```{r}
+head(sort(summary(sales$City)))
+```
+
+As shown above, we can see that there are some cities with relatively few entries. Therefore, the `City` variable must be taken into context during train-test splitting, especially `Cities` 31, 91, and 21 with the lowest amount of entries. Additionally, since it is unknown what cities these numbers represent, we are unable to combine nor remove these variables.
+
+We will now observe the correlation between the dependent variable and the numeric independent variables.
+```{r}
+cor(sales$Price, sales$SQFT)
+cor(sales$Price, sales$FLR1AREA)
+cor(sales$Price, sales$SFLA)
+cor(sales$Price, sales$EFF_AGE)
+```
+
+We can see that the relationships between `Price` and `SQFT` `Price` and `EFF_AGE` are not significant, while the results also show that there is a moderate correlation between `Price` and `FLR1AREA`. On the other hand, we can see that the correlation of the `SFLA` variable is significant. Therefore, we can assume that `SFLA` will be significant in our models as well.
+
+Now, we will also analyze the correlation between categorical/numerical variables and the outcome variable.
+```{r}
+cor(sales$Price, sales$RMTOT)
+cor(sales$Price, sales$RMBED)
+cor(sales$Price, sales$BATH)
+```
+
+As we can see, the correlation shows that there the relationship between `RMTOT` and `RMBED` towards the dependent variable. On the other hand, `BATH` shows a relatively significant positive correlation towards the prices.
+
+We will now compare the correlation between the variables with box plots and scatter plots for the categorical independent variables.
+```{r out.width=c('50%', '50%'), fig.show='hold'}
+lapply(var.categ, function(x) ggplot(sales, aes_string(x=x, y="Price", color=x)) + geom_boxplot())
+```
+
+In the box plots above, we can see how each categorical variable relates towards the prices. Overall, there are not a lot of correlation between most categorical variables towards the prices. However, one results that stand out is in the `GRADE` box plot. We can see that the average price of the houses decreases with the `GRADE`. We can also observe the existence of some outliers in each grade category, one of them being a data point that is far on top in Category 'E'.
+
+Other than that, it can be observed that there is a slight decrease of price as a house owns an attic and house prices in Province 2 has the most expensive houses on average, followed by Provinces 1 and 3.  and since a city is dependent on a certain province,
+
+Additionally, prices vary in different cities. Furthermore, there may exist a dependency or relationship between `City` and `Province` as both explain geographical location of a certain house: the use of one variable renders the other redundant. However, since the both cities and provinces are only represented in numerical values, the model may not be able to observe their dependency. Therefore, it is crucial to select one of the two variables for modelling. 
+
+Since the `City` variable is more detailed in comparison to the provinces, we will exclude the `Province` variable from the model. Additionally, the price of a house is also more likely to be more expensive on the city of the respective house, instead of the province which represents a broader area and too generalized. 
+
+```{r}
+ggplot(sales) + geom_boxplot(aes(x = City, y = Price, color = Province))
+```
+
+As shown on the figure above, we can see that prices vary based on their cities and somewhat independent of their provinces. Moreover, the cities represent a larger population of the data and is more inclusive rather than the provinces. Consequently, the `City` variable becomes a more suitable candidate in the feature selection, rather than `Province`.
+
+Now, we will proceed to the numerical variables.
+```{r out.width=c('50%', '50%'), fig.show='hold'}
+lapply(var.num, function(x) ggplot(sales, aes_string(x=x, y="Price")) + geom_point())
+```
+
+From the plots, we can conclude the same conclusion as before based on the correlation coefficients, such as the relationship between `SQFT` and `Price` which shows almost no correlation between the two. The same can be concluded from the plots for variables `RMTOT`, `RMBED`, `BATH`, and `EFF_AGE`. In contrast, it can be observed that there exist a positive correlation between `SFLA` and `Price` and `FLR1AREA` and `Price`.
+
+
+
+******
+
+# Train Test Splitting
+We are now ready to split the data set into train and test set. The splitting will be done using `CreateDataPartition` function from the `caret` package. The train-test split ratio will be 80:20 and stratified splitting will be done based on `GRADE`. This variable selection is due to the strong correlation that exists between a house's grade and its price as previously discussed. Additionally, the train-test set must also include some cities with a few entries.
+```{r, echo=TRUE}
+train.idx <- createDataPartition(y = sales$GRADE, p = 0.8, list = FALSE)
+train <- sales[train.idx, ]
+test <- sales[-train.idx, ]
+
+# Checking the proportion of the GRADE categorical variable
+# in the train and test set in comparison to the original data set
+rbind("Data Set" = table(sales$GRADE),
+      "Train" = table(train$GRADE),
+      "Test" = table(test$GRADE))
+rbind("Data Set" = prop.table(table(sales$GRADE)),
+      "Train" = prop.table(table(train$GRADE)),
+      "Test" = prop.table(table(test$GRADE)))
+```
+
+We can see that all categories in `GRADE` exist in both train and test set with a similar proportion to the original data. we will now check the proportions of the cities in the train and test set.
+```{r}
+rbind("Data Set" = table(sales$City),
+      "Train" = table(train$City),
+      "Test" = table(test$City))
+rbind("Data Set" = prop.table(table(sales$City)),
+      "Train" = prop.table(table(train$City)),
+      "Test" = prop.table(table(test$City)))
+```
+It can be observed that the proportions of the cities in both train and test set are close to the proportions in the original data set. Even though there are cities such as cities 21, 31, 49, and 91 that have only a few data points in the test set, we would ignore them as we already have sufficient amount of data with (more than 10 data) to fit in the train set.
+
+
+
+******
+
+# Generalized Additive Model (GAM)
+Generalized Additive Model (GAM) is a model that assumes that the explanatory variable may not have a linear relationship with the response variable. For each independent variable, GAM will create a spline instead of only weighting them linearly in Generalized Linear Model (GLM). GAM creates partitions for a certain variable and within each partition, GAM fits a function for that suits the respective variable and continues doing so in the next partition, in which the functions combined as a result is called a spline. GAM does the process of fitting splines automatically. However, splines will not be created for categorical variables.
+
+In the `gam` library in R, we can determine a variable to be fitted with a spline by using the `s()` function during the modelling.
+
+## Modelling Preparation
+As previously mentioned, we will assume that all numerical variables do not have a linear relationship with the price and add the `s()` for the modelling.
+```{r}
+# Preparing outcome and independent variables for the models
+# We also transform the outcome with logarithm transformation.
+outcome <- "log(Price)"
+s.var.num <- paste("s(", var.num, ")", sep = "")
+```
+
+We will also choose between `City` or `Province` as the independent variable in our model. We will analyze it based on the aic of the model using the respective variables.
+```{r}
+f.temp1 <- as.formula(paste(outcome,
+                            paste(c(s.var.num, var.categ[!var.categ %in% "Province"]), collapse = "+"), 
+                            sep = "~"))
+f.temp2 <- as.formula(paste(outcome, 
+                            paste(c(s.var.num, var.categ[!var.categ %in% "City"]),collapse = "+"),
+                            sep = "~"))
+
+c("City AIC" = gam(f.temp1, data = train)$aic, "Province AIC" = gam(f.temp2, data = train)$aic)
+```
+
+From the results above, the AICs indicate a similar result to the EDA. Model with the `City` variable has a higher AIC in comparison to the `Province`. It can be inferred that there are more residues in the model with province variable which in turn affects the fitted values which increases the AIC value. 
+
+Therefore, the models will be created with the `City` variable and exclude the `Province` variable.
+```{r}
+var.categ <- var.categ[!var.categ %in% "Province"]
+(f <- as.formula(paste(outcome, 
+                      paste(c(s.var.num, var.categ), collapse = "+"),
+                      sep = "~")))
+```
+
+```{r}
+par(mfrow=c(1,2))
+hist(sales$Price)
+hist(log(sales$Price))
+```
+
+Additionally, by transforming the response variable with the logarithm function, we can see that the range of data values become smaller and the distribution of the data becomes less skewed, although it does not completely resemble a normal distribution. This transformation allows a better outcome during model fitting.
+
+## Model Evaluation Functions
+To analyze and evaluate our models, we will use the following functions.
+```{r}
+options(scipen=999) # Disable Scientific Notation
+
+# Plots relationships between Log Sale Price, Prediction, and Residuals on the train set
+# Function also returns a bin which contains indices of extreme residual data
+eval.train_init <- function(model, train, outliers){
+  zresid = data.frame(x=rstandard(model))
+  title = ifelse(outliers == TRUE, "Outliers not Removed", "Outliers Removed")
+
+  print(ggarrange(
+    ggplot() + geom_point(aes(x=model$fitted.values, y=log(train$Price))) +
+      geom_abline(aes(intercept = 0, slope = 1), colour = "blue") +
+      ggtitle(paste("Log SalePrice vs Prediction - Training Set,", title)) +
+      theme(plot.title = element_text(hjust = 0.5)) +
+      labs(x = "Prediction on Train Data", y ="Log Sales Price"),
+    ggplot() + geom_point(aes(x=model$fitted.values, y=zresid$x)) +
+      geom_abline(aes(intercept = 0, slope = 0), colour = "blue") +
+      ggtitle(paste("Residual vs Prediction - Training Set,", title)) +
+      theme(plot.title = element_text(hjust = 0.5)) +
+      labs(x = "Prediction on Train Data", y ="Residual"),
+    nrow = 2, align = "v"))
+  
+  if(outliers == TRUE){
+    bin = which(abs(zresid)>3)
+    return(bin)
+  }
+}
+
+# Updates train data by removing residuals in the model.
+eval.train_update <- function(model, train, bin){
+  if(length(bin)>0) {
+    train.outliers = train
+    train.outliers$outliers = 0
+    train.outliers$outliers[bin] = 1
+    train.outliers$pred = model$fitted.values
+    train.outliers$pred.dollar = exp(train.outliers$pred)
+    train.2 = train[-bin,]
+  } else {
+    train.2 = train
+  }
+  
+  return(train.2)
+}
+
+# Compare predicted and observed data
+# Function returns a list of metrics used for comparison
+comp <- function(pred, obs){
+  n = length(obs)
+  rsq = cor(pred,obs)^2
+  mse = sum((pred - obs)^2)/n
+  semse = sd((pred - obs)^2) / sqrt(n)
+  rmse = sqrt(mse)
+  se = sd(pred-obs) / sqrt(n)
+  mae = sum(abs(pred-obs))/n
+  mape = sum(abs(pred-obs)/obs)/n*100
+  return(list("n"=n,"R2"=rsq,"MSE"=mse,"SEMSE"=semse,"RMSE"=rmse,"SE"=se,"MAE"=mae,"MAPE"=mape))
+}
+
+# Plots relationships between Log Sale Price and Prediction, and Residuals in the test set
+# Function also returns the comp function for predictions in the test set
+# (with respect to normal Price, not log(Price))
+eval.test <- function(pred, obs){
+  # Residual for the test set (must be scaled)
+  zresid.test = scale(pred - log(obs))
+  
+  print(ggarrange(
+    ggplot() + geom_point(aes(x=pred, y=log(obs))) +
+        geom_abline(aes(intercept = 0, slope = 1), colour = "blue") +
+        ggtitle("Log SalePrice vs Prediction - Testing Set") +
+        theme(plot.title = element_text(hjust = 0.5)) +
+        labs(x = "Prediction on Test Data", y ="Log Sales Price"),
+    ggplot() + geom_point(aes(x=pred, y=zresid.test)) +
+      geom_abline(aes(intercept = 0, slope = 0), colour = "blue") +
+      ggtitle("Residual vs Prediction - Testing Set") +
+      theme(plot.title = element_text(hjust = 0.5)) +
+      labs(x = "Prediction on Test Data", y ="Residual"),
+    nrow = 2, align = "v"))
+  
+  comp.test = comp(exp(pred), obs)
+  print(comp.test)
+  
+  return(comp.test)
+}
+
+
+# Saves plot into pdf
+plot2pdf <- function(plots, filename){
+  pdf = paste("D:/Downloads/", filename, ".pdf", sep = "")
+  pdf(file = pdf)
+  for (i in 1:length(plots)){
+    plot(plots[[i]])
+  }
+  dev.off
+  paste("Saved to ", toString(pdf), sep = "")
+}
+```
+
+
+
+******
+
+# GAM Model 1
+```{r, echo=TRUE}
+mod.gam <- gam(f, data = train)
+summary(mod.gam)
+```
+
+```{r, echo=TRUE}
+# Saving spline plots to pdf
+plot2pdf(preplot(mod.gam), "GAM_InteractionPlots_1")
+```
+
+```{r out.width=c('50%', '50%'), fig.show='hold'}
+plot(mod.gam)
+```
+
+From the GAM interaction plots above, it can be observed that there are some variables that are not linear as the splines do not form a straight line. One of the most distinct plots is the SQFT spline. As observed above, the `SQFT` spline drastically rises at first, then falls, and rises again. This shows that the `SQFT` is not linear. Other results highlight the same conclusion, such as `RMTOT`, `RMBED`, `FLR1AREA`, and `EFF_AGE`. Meanwhile, spline for `SFLA` resembles a quadratic function, while spline for `FLR1AREA` shows an almost linear function. 
+
+Additionally, conclusions cannot be inferred from the categorical plots as splines were not defined for those variables.
+
+## Model Evaluation 1 - AIC & Residual Analysis
+```{r, echo=TRUE}
+mod.gam$aic
+bin.gam = eval.train_init(mod.gam, train, outliers = TRUE)
+train.gam = eval.train_update(mod.gam, train, bin.gam)
+```
+In the model's summary, that the model received an AIC value of 14221.74, which will be used to compare with the next model with removed outliers in the train set.
+
+From the graph above, we can see from the first graph that the predictions made by the model are spread around the y=x line, which shows that the predictions are close to the actual values. However, we can see that there are a couple of wrong predictions. The second graph highlights these wrong outcomes as we can see that there are some residuals that are far from the predictions. Residuals are the difference between each predicted data and the actual value of the data.  Data considered as residuals were evaluated by the `rstandard()` function and values that are greater than 3 will be removed in the following step.
+
+## Remodelling With New Train Set
+```{r, echo=TRUE}
+mod.gam.final <- gam(f, data = train.gam)
+summary(mod.gam.final)
+```
+
+```{r, echo=TRUE}
+# Saving spline plots to pdf
+plot2pdf(preplot(mod.gam.final), "GAM_InteractionPlots_1_final")
+```
+
+```{r out.width=c('50%', '50%'), fig.show='hold'}
+plot(mod.gam.final)
+```
+
+From the splines plot, we can see that there some changes in the spline as a result of fitting with the outliers removed. Two most prominent changes can be seen in the `RMTOT` plot with a more wavy line and `RMBED` which was initially steeply decreasing in the previous splines plot. However, almost all other the plots are consistent with the previous results, such as `FLR1AREA` resembling a linear function.
+
+## Model Evaluation 2 - New AIC, Residual Analysis, and Error Analysis
+```{r, echo=TRUE}
+data.frame("Outliers Not Removed" = mod.gam$aic, 
+           "Outliers Removed" = mod.gam.final$aic)
+
+eval.train_init(mod.gam.final, train.gam, outliers = FALSE)
+```
+
+After we have removed the outliers in the training set, we can see that there is a highly significant decrease in the AIC of the model. This means that the model is now performing much better with outliers removed.
+
+From the graphs, we can now see that the predictions are now closer the actual values and the residuals are also closer to 0. It is also worth noting that there are no significant patterns present in the residuals vs prediction plot; the residuals are randomly distributed.
+
+Now, we are going to analyze the error in the predictions of the train set. We will also compare the metrics with the previous model with outliers not removed.
+```{r}
+merge(stack(comp(exp(mod.gam$fitted.values), exp(mod.gam$y))),
+      stack(comp(exp(mod.gam.final$fitted.values), exp(mod.gam.final$y))),
+      by = "ind", sort = FALSE)
+```
+
+From the results, we can conclude that out of the 22951 data in the train set with outliers removed, the model receives an RMSE of 58340.79 and an average absolute error of 19.64%. These values show an increase in performance from the previous model with outliers intact. This can be concluded from the lower RMSE and MAPE values.
+
+## Multicollinearity
+```{r}
+vif(mod.gam.final)
+```
+
+From the VIF scores, we can see that all numerical variables have a relatively small VIF with values below 4. Therefore, we can conclude that each independent variable is not a linear combination of other independent variables. On the other hand, we will ignore the vif values of the categorical and the numerical/categorical variables.
+
+## Prediction and Error Analysis
+```{r}
+test.gam = test
+test.gam$prediction = predict(mod.gam.final, newdata = test.gam, type = "response")
+```
+
+```{r}
+error.gam = eval.test(test.gam$prediction, test.gam$Price)
+```
+
+From the graph, we can see that there are still a lot of predictions that are far away from the y=x line, which means that the model has some inaccurate predictions in the test set. The second graph further highlights these findings.
+
+From the results, we can conclude that out of the 5837 data in the test set, the model successfully predicted the prices with RMSE of 66049.89 and average absolute error of 27.62%. These metrics and the model's AIC will be kept for further comparison with the results from other models.
+
+
+
+******
+
+# GAM Model 2
+From the previous model, we concluded that there is still a number of predictions that are far away from the real values. We will now attempt to obtain a better performance by changing the variables used in the modelling.
+
+First, since `SQFT` has low correlation towards `Price` and an unusual non-linearity, we will exclude `SQFT`. Next, we will also exclude the `RMTOT` variable as `RMBED` also explains the number of rooms, specifically bedrooms, which also has a higher correlation than `RMTOT`. Lastly, we will also attempt to not apply spline to `FLR1AREA` as the splines resemble a linear function.
+```{r}
+var.num2 <- var.num[!var.num %in% c("SQFT", "RMTOT", "FLR1AREA")]
+s.var.num2 <- paste("s(", var.num2, ")", sep = "")
+
+(f2 <- as.formula(paste(outcome, 
+                      paste(c(s.var.num2, var.categ, "FLR1AREA"), collapse = "+"),
+                      sep = "~")))
+```
+
+```{r, echo=TRUE}
+mod.gam2 <- gam(f2, data = train)
+summary(mod.gam2)
+```
+
+```{r, echo=TRUE}
+# Saving spline plots to pdf
+plot2pdf(preplot(mod.gam2), "GAM_InteractionPlots_2")
+```
+
+```{r out.width=c('50%', '50%'), fig.show='hold'}
+plot(mod.gam2)
+```
+
+From the new GAM interaction plots above, we now obtain a linear relationship for `FLR1AREA`.
+
+## Model Evaluation 1 - AIC & Residual Analysis
+```{r, echo=TRUE}
+mod.gam2$aic
+bin.gam2 = eval.train_init(mod.gam2, train, outliers = TRUE)
+train.gam2 = eval.train_update(mod.gam2, train, bin.gam2)
+```
+In the model's summary, that the model received an AIC value of 14407.59, which will be used to compare with the next model with removed outliers in the train set.
+
+As previously discussed from Model 1, we can see from the first graph that the predictions made by the model are spread around the y=x line, which shows that the predictions are close to the actual values. The second graph highlights the residuals or errors in the fitted values. Residuals are the difference between each predicted data and the actual value of the data. Residuals were then processed the same way as before.
+
+## Remodelling With New Train Set
+```{r, echo=TRUE}
+mod.gam2.final <- gam(f2, data = train.gam2)
+summary(mod.gam2.final)
+```
+
+```{r, echo=TRUE}
+# Saving spline plots to pdf
+plot2pdf(preplot(mod.gam2.final), "GAM_InteractionPlots_2_final")
+```
+
+```{r out.width=c('50%', '50%'), fig.show='hold'}
+plot(mod.gam2.final)
+```
+
+From the splines plot, we can see that there some changes in the spline as a result of fitting with the outliers removed. Just as in Model 1, `RMBED` now has a drastically different fitted spline. This might indicate that the spline fitting is subject to overfitting.  However, almost all of the plots are consistent with the previous results, such as `FLR1AREA` resembling a linear function.
+
+## Model Evaluation 2 - New AIC, Residual Analysis, and Error Analysis
+```{r, echo=TRUE}
+data.frame("Outliers Not Removed" = mod.gam2$aic, 
+           "Outliers Removed" = mod.gam2.final$aic)
+
+eval.train_init(mod.gam2.final, train.gam2, outliers = FALSE)
+```
+
+After we have removed the outliers in the training set, we can see that there is a highly significant decrease in the AIC of the model. This means that the model is now performing much better with outliers removed.
+
+From the graphs, we can now see that the predictions are now closer the actual values and the residuals are also closer to 0. It is also worth noting that there are no significant patterns present in the residuals vs prediction plot; the residuals are randomly distributed.
+
+Now, we are going to analyze the error in the predictions of the train set. We will also compare the metrics with the previous model with outliers not removed.
+```{r}
+merge(stack(comp(exp(mod.gam2$fitted.values), exp(mod.gam2$y))),
+      stack(comp(exp(mod.gam2.final$fitted.values), exp(mod.gam2.final$y))),
+      by = "ind", sort = FALSE)
+```
+
+From the results, we can conclude that out of the 22951 data in the train set with outliers removed, the model receives an RMSE of 58427.58 and an average absolute error of 19.74%. These values show an increase in performance from the previous model with outliers intact. This can be concluded from the lower RMSE and MAPE values.
+
+## Multicollinearity
+```{r}
+vif(mod.gam2.final)
+```
+
+From the VIF scores, we can see that all of them have a relatively small VIF with values below 4. Therefore, we can conclude that each independent variable is not a linear combination of other independent variables. In addition, we can also see that some variables, notably the `RMBED` variable, has lower vif values in comparison to the results in the previous model.
+
+## Prediction and Error Analysis
+```{r}
+test.gam2 = test
+test.gam2$prediction = predict(mod.gam2.final, newdata = test.gam2, type = "response")
+```
+
+```{r}
+error.gam2 = eval.test(test.gam2$prediction, test.gam2$Price)
+```
+
+From the graph, we can see that there are still a lot of predictions that are far away from the y=x line, which means that the model has some inaccurate predictions in the test set. The second graph further highlights these findings. However, we are unable to conclude a better model between Model 1 and Model 2 from the plots as both result in similar residual plots.
+
+From the results, we can conclude that out of the 5837 data in the test set, the model successfully predicted the prices with RMSE of 66287.97 and average absolute error of 27.71%. These metrics and the model's AIC will be kept for further comparison with the results from Model 1.
+
+
+
+******
+
+# Comparison and Conclusion
+After creating 2 models with the gam, we are now going to compare the performance of the models using the computed metrics.
+```{r}
+comp.aic <- data.frame("Metric" = "AIC",
+                      "Model 1" = mod.gam.final$aic,
+                      "Model 2" = mod.gam2.final$aic)
+comp.error <- merge(stack(error.gam), stack(error.gam2), by="ind", sort = FALSE)
+names(comp.error) <- names(comp.aic)
+comp.df <- rbind(comp.aic, comp.error)
+
+comp.df
+```
+
+From the results above, we can see that the AIC of Model 1 is lower than that of Model 2's. This indicates that there are more residues in Model 2 which affects the fitted values of the model which increases the AIC value. Therefore, we can conclude that the Model 1 is a slightly better model in terms of fitted values and its residues.
+
+Similar conclusions can also be taken by evaluating other metrics, such as RMSE and MAPE. Model 1 outperforms Model 2 in both metrics: the RMSE is smaller by approximately 238.082 while the MAPE is smaller by approximately 0.088%. This means that the square root of the average of the squared error and the average absolute percentage of error in the prediction of Model 1 is slightly less than the values obtained from Model 2. Therefore, it can be assumed that Model 1 is more accurate than Model 2.
+
+In conclusion, GAM has managed to fit the independent variables into splines which allows GAM to analyze non-linear relationships between an independent variable and the dependent variable, `Price`, which can not be done in GLM. Splines indicated that there indeed exist some variables that do not have a linear relationship, while others such as `FLR1AREA` indicated differently. However, some spline fitting may be susceptible to overfitting, such as the splines for `RMBED` presented in the models fitted with removed outliers in both Model 1 and Model 2.
+
+Furthermore, removing `Province` and selecting `City` as the selected independent variables the model results in models that with a relatively high performance and accuracy. Although further removal of variables with low correlation towards price `SQFT` and `RMTOT` and the assumption of `FLR1AREA` having a linear relationship with the response variable resulted in a more inaccurate model, the slight difference in the evaluating metrics indicate that the difference in performance might be insignificant. The removal of the variables also resulted in lower multicollinearity between the independent variables. This further suggests the low importance of the variables and justifies the approach done during feature selection and fitting in Model 2.  
+
+These findings may be surprising especially as many might have assumed that the price of a house is highly determined by the total land size (`SQFT`) of the certain house. On the other hand, the fact that the grade (`GRADE`) and total square foot living area (`SFLA`) of a house highly impacts the price of a house has most likely been expected.

@@ -1,0 +1,932 @@
+---
+title: "Melbourne Housing Snapshot - Price Prediction"
+author: "Yohan Chandrasukmana"
+date: "4/25/2022"
+output:
+  html_document:
+    code_folding: show
+    number_sections: yes
+    toc: yes
+    toc_float: yes
+  pdf_document:
+    number_sections: yes
+    toc: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+******
+
+
+## Loading Library
+
+Libraries used in this project are as follows.
+```{r}
+library(tidyverse)
+library(caret) # for splitting train-test set and train-eval set
+library(ggpubr) # for arranging ggplot
+library(gam) # for GAM
+library(car) # for calculating collinearity with vif
+library(gbm) # for GBM
+library(tictoc) # to measure time
+library(reshape2) # melt()
+```
+
+
+******
+
+# Data Description
+Data used in this study case are Melbourne real estate prices from the Melbourne Housing Snapshot dataset. Accessed on April 14, 2022, https://www.kaggle.com/datasets/dansbecker/melbourne-housingsnapshot
+
+## Data Loading and Prerequisites
+Data saved in the CSV files will be loaded using the function `read.csv`.
+```{r}
+rm(list=ls())   # clean up workspace
+melb <- read.csv('melb_data_clean.csv')
+head(melb)
+```
+
+
+******
+
+# Data Exploration
+```{r}
+summary(melb)
+```
+
+There are some variables that are not going to be used in the study. 
+```{r}
+# Removing Unused Variables
+unused <- c("Suburb", "Address", "Method", "SellerG", "Date", 
+            "Postcode", "Bedroom2", "Bathroom", "YearBuilt", "Lattitude", 
+            "Longtitude", "Propertycount", "SalesYear")
+melb <- melb[, !names(melb) %in% unused]
+```
+
+Next, since the ID variable contains unique values for each entry will also be removed.
+```{r}
+melb <- melb[, !names(melb) %in% "ID"]
+```
+
+
+## Type Casting
+```{r}
+# Numerical Variable
+numerical <- c('Distance', 'Landsize', 'BuildingArea', 'EffAge')
+
+# Categorical Variable
+categorical <- c('Rooms', 'Type', 'Car', 'Regionname', 'CouncilArea')
+melb[, categorical] = lapply(melb[, categorical], factor)
+
+# Changing the order of levels for 'Car'
+melb$Car <- factor(melb$Car, levels=c("0","1","2","3",">4"))
+
+summary(melb)
+```
+
+
+## Dependent Variable Analysis - Price
+
+We will now explore the `Price` variable.
+```{r}
+summary(melb$Price)
+```
+
+```{r}
+ggplot(melb) + geom_histogram(aes(x = Price), bins=30)
+qqnorm(melb$Price,main="QQ plot"); qqline(melb$Price)
+ks.test(melb$Price, "pnorm")
+```
+
+From the histogram, it can be clearly seen that the data is strongly right-skewed. It can be further observed from the quantile-quantile plot and Kolmogorov-Smirnov test with p-value of 2.2e-16 < 0.05, it can be concluded that the data is not normally distributed. 
+
+This distribution may be caused due to the existence of outliers in the data.
+```{r}
+ggplot(melb) + geom_boxplot(aes(y = Price))
+```
+
+It can be observed that there are outliers present in the data. These outliers will be removed to obtain a better model.
+
+A certain price will be considered as an outlier with the following formula: 
+$$
+ outliers = 3*Interquartile Range / 1.5
+$$
+
+```{r}
+# Total number of outliers:
+paste("outliers:", length(boxplot.stats(melb$Price, coef = 3)$out))
+out = boxplot.stats(melb$Price, coef = 3)$out
+out_key = which(melb$Price %in% c(out))
+melb = melb[-out_key, ]
+```
+
+```{r}
+# Checking the histogram and boxplot of the data with removed outliers
+ggplot(melb) + geom_histogram(aes(x = Price), bins=30)
+ggplot(melb) + geom_boxplot(aes(y = Price))
+```
+
+After the removal of the outliers, both the histogram and the boxplot are seemingly better with the distribution being less skewed.
+
+
+## Independent Variable Analysis - Numerical Variable
+
+```{r}
+summary(melb$Distance)
+summary(melb$Landsize)
+summary(melb$BuildingArea)
+summary(melb$EffAge)
+```
+
+From the summaries above, it can be concluded that there might not be irregularities in the values of the independent variables.
+
+Next, the correlation between the independent variables towards the Price will be tested.
+```{r}
+cor(melb$Price, melb$Distance)
+cor(melb$Price, melb$Landsize)
+cor(melb$Price, melb$BuildingArea)
+cor(melb$Price, melb$EffAge)
+```
+
+From the correlation results, it can be inferred that BuildingArea has the highest correlation followed by EffAge, Distance, and Landsize. However, none of results showed a strong correlation with BuildingArea being only moderately positively correlated with the Price with a correlation value of 0.476. Furthermore, Landsize with a correlation value of -0.007 indicate that it does not affect the real estate prices.
+
+
+## Independent Variable Analysis - Categorical Variable
+```{r}
+table(melb$Rooms)
+table(melb$Type)
+table(melb$Car)
+table(melb$Regionname)
+table(melb$CouncilArea)
+```
+
+From the proportions of the categorical variables, it can be observed that there are only a few data in some regions and council areas. Therefore, a stratified random sampling based on these variables can be considered in the train-test split so that these variables are well represented in the taken sample,
+
+```{r out.width=c('50%', '50%'), fig.show='hold'}
+# Boxplot
+lapply(categorical, function(x) ggplot(melb, aes_string(x=x, y="Price", color=x)) + geom_boxplot())
+```
+
+From the barplots above, there are indications of how each categorical variable relates towards the prices. It seems that as the number of rooms increases, the price increases as well. However, this only holds for until 5 total number of rooms as the boxplot fluctuates from 6-8 and only increased in 7 total number of rooms.
+
+Next, the real estate type also seems to affect the prices with h, t, and u being the most to least expensive. For the total number of car, there seems to be no indication of total number of cars towards the price of the house. In both region name and council area, prices differ in different locations.
+
+Since both region name and council area indicate the location of the real estate, their relationship will now be analyzed through the following boxplot.
+```{r}
+ggplot(melb) + geom_boxplot(aes(x=CouncilArea, y = Price, color=Regionname))
+```
+
+
+******
+
+# Modelling - Clustering
+
+In this section, the variables in the data will be used to create 3 clusters with k-means clustering which will be used in the modelling in the next sections. In order to use the categorical variables, they must first be transformed as numeric for the clustering to work.
+
+```{r}
+melb_kmeans <- melb
+melb_kmeans[, categorical] <- lapply(melb[, categorical], as.numeric)
+summary(melb_kmeans[, categorical])
+```
+
+Now, the data is ready to be used in k-means clustering. The parameter will be used is nstart which specifies the initial centroid in the beginning. It will be set to the same amount of clusters that are going to be created.
+
+## With `Regionname` and `CouncilArea`
+```{r}
+mod_cluster = kmeans(melb_kmeans, 3, nstart=3)
+
+# Saving Clusters into a Variable
+clusters1 = as.factor(mod_cluster$cluster)
+```
+
+The following are the centroids' location in the final iteration.
+```{r}
+mod_cluster$centers
+```
+
+
+```{r out.width=c('50%', '50%'), fig.show='hold'}
+lapply(numerical, function(x) ggplot(melb, aes_string(x=x, y="Price", color=clusters1)) + geom_point())
+```
+
+```{r out.width=c('50%', '50%'), fig.show='hold'}
+lapply(categorical, function(x) ggplot(melb, aes_string(x=x, y="Price", color=clusters1)) + geom_point())
+```
+
+
+## Without `Regionname` and `CouncilArea`
+```{r}
+mod_cluster = kmeans(melb_kmeans[, !names(melb_kmeans) %in% c("Regionname", "CouncilArea")], 
+                     3, nstart=3)
+
+# Saving clusters into a Variable
+clusters2 = as.factor(mod_cluster$cluster)
+```
+
+The following are the centroids' location in the final iteration.
+```{r}
+mod_cluster$centers
+```
+
+
+```{r out.width=c('50%', '50%'), fig.show='hold'}
+lapply(numerical, function(x) ggplot(melb, aes_string(x=x, y="Price", color=clusters2)) + geom_point())
+```
+
+```{r out.width=c('50%', '50%'), fig.show='hold'}
+lapply(categorical, function(x) ggplot(melb, aes_string(x=x, y="Price", color=clusters2)) + geom_point())
+```
+
+## Cluster Results
+```{r}
+summary(clusters1)
+summary(clusters2)
+```
+
+From both clustering models, the data is divided into three clusters with the same amount of data. However, the order of the clusters is changed. From the plots of the relationship between each independent variable, price, and cluster, the results are similar with the clusters only dividing based on the price. It could be concluded that both models result in the same clusters with different order.
+
+The cluster results of the first model will be kept into the data set as a variable which will be used in other models for prediction. The reason for the choice of this cluster is due to the order of clusters from 1 to 3 which corresponds to how high the price is as well.
+```{r}
+melb$Cluster <- clusters1
+summary(melb$Cluster)
+```
+
+In total, there are 2982, 1681, and 461 data in Clusters 1 to 3.
+
+
+******
+
+# Train-Test Split
+
+The splitting will be done using `CreateDataPartition()` function from the caret package. The train-test split ratio will be 80:20 and stratified splitting will be done based on the clusters made. Additionally, the train-test set must also include some regions and council areas with a few entries.
+```{r}
+set.seed(1)
+train.idx <- createDataPartition(y = melb$Cluster, p = 0.8, list = FALSE)
+train <- melb[train.idx, ]
+test <- melb[-train.idx, ]
+```
+
+```{r}
+# Checking the proportion of the Cluster categorical variable
+# in the train and test set in comparison to the original data set
+rbind("Data Set" = prop.table(table(melb$Cluster)),
+      "Train" = prop.table(table(train$Cluster)),
+      "Test" = prop.table(table(test$Cluster)))
+```
+
+```{r}
+# Checking the proportion of the region name categorical variable
+# in the train and test set in comparison to the original data set
+rbind("Data Set" = prop.table(table(melb$Regionname)),
+      "Train" = prop.table(table(train$Regionname)),
+      "Test" = prop.table(table(test$Regionname)))
+```
+
+```{r}
+# Checking the proportion of the council area categorical variable
+# in the train and test set in comparison to the original data set
+rbind("Data Set" = prop.table(table(melb$CouncilArea)),
+      "Train" = prop.table(table(train$CouncilArea)),
+      "Test" = prop.table(table(test$CouncilArea)))
+```
+
+From the stratified random sampling, the train-test sample obtained did not include the Macedon Ranges council area. Some other proportions both in the region and council names differ from the original proportion. However, the sampling has quite represented the overall proportions of the region and council area
+
+
+******
+
+# Preparation For Modelling
+
+## Prices Normality
+From the data exploration, it was found that the distribution of the data is strongly skewed, even after removal of outliers. Therefore, a log transformation towards the `Price` variable will be attempted in order to make the distribution of the `Price` variable resemble a normal distribution even more.
+```{r out.width=c('50%', '50%'), fig.show='hold'}
+ggplot(melb) + geom_histogram(aes(x = log(Price)), bins=30)
+qqnorm(log(melb$Price),main="QQ plot"); qqline(log(melb$Price))
+```
+
+On both the histogram and qqplot, the log(Price) seems to follow a normal distribution. Therefore, this transformation will be used in future modelling and this may result in a better outcome during model fitting.
+
+## Modelling Functions
+```{r}
+options(scipen=999) # Disable Scientific Notation
+
+# Plots relationships between Log Sale Price, Prediction, and Residuals on the train set
+# Function also returns a bin which contains indices of extreme residual data
+eval.train_init <- function(model, train, outliers){
+  zresid = data.frame(x=rstandard(model))
+  title = ifelse(outliers == TRUE, "Outliers not Removed", "Outliers Removed")
+
+  print(ggarrange(
+    ggplot() + geom_point(aes(x=model$fitted.values, y=log(train$Price))) +
+      geom_abline(aes(intercept = 0, slope = 1), colour = "blue") +
+      ggtitle(paste("Log SalePrice vs Prediction - Training Set,", title)) +
+      theme(plot.title = element_text(hjust = 0.5)) +
+      labs(x = "Prediction on Train Data", y ="Log Sales Price"),
+    ggplot() + geom_point(aes(x=model$fitted.values, y=zresid$x)) +
+      geom_abline(aes(intercept = 0, slope = 0), colour = "blue") +
+      ggtitle(paste("Residual vs Prediction - Training Set,", title)) +
+      theme(plot.title = element_text(hjust = 0.5)) +
+      labs(x = "Prediction on Train Data", y ="Residual"),
+    nrow = 2, align = "v"))
+  
+  if(outliers == TRUE){
+    bin = which(abs(zresid)>3)
+    return(bin)
+  }
+}
+
+# Updates train data by removing residuals in the model.
+eval.train_update <- function(model, train, bin){
+  if(length(bin)>0) {
+    train.outliers = train
+    train.outliers$outliers = 0
+    train.outliers$outliers[bin] = 1
+    train.outliers$pred = model$fitted.values
+    train.outliers$pred.dollar = exp(train.outliers$pred)
+    train.2 = train[-bin,]
+  } else {
+    train.2 = train
+  }
+  
+  return(train.2)
+}
+
+# Plots relationships between Log Sale Price and Prediction, and Residuals in the test set
+# Function also returns the comp function for predictions in the test set
+# (with respect to normal Price, not log(Price))
+eval.test <- function(pred, obs){
+  # Residual for the test set (must be scaled)
+  zresid.test = scale(pred - log(obs))
+  
+  print(ggarrange(
+    ggplot() + geom_point(aes(x=pred, y=log(obs))) +
+        geom_abline(aes(intercept = 0, slope = 1), colour = "blue") +
+        ggtitle("Log SalePrice vs Prediction - Testing Set") +
+        theme(plot.title = element_text(hjust = 0.5)) +
+        labs(x = "Prediction on Test Data", y ="Log Sales Price"),
+    ggplot() + geom_point(aes(x=pred, y=zresid.test)) +
+      geom_abline(aes(intercept = 0, slope = 0), colour = "blue") +
+      ggtitle("Residual vs Prediction - Testing Set") +
+      theme(plot.title = element_text(hjust = 0.5)) +
+      labs(x = "Prediction on Test Data", y ="Residual"),
+    nrow = 2, align = "v"))
+  
+  comp.test = comp(exp(pred), obs)
+  print(comp.test)
+  
+  return(comp.test)
+}
+
+# Compare predicted and observed data
+# Function returns a list of metrics used for comparison
+comp <- function(pred, obs){
+  n = length(obs)
+  rsq = cor(pred,obs)^2
+  mse = sum((pred - obs)^2)/n
+  semse = sd((pred - obs)^2) / sqrt(n)
+  rmse = sqrt(mse)
+  se = sd(pred-obs) / sqrt(n)
+  mae = sum(abs(pred-obs))/n
+  mape = sum(abs(pred-obs)/obs)/n*100
+  return(list("n"=n,"R2"=rsq,"MSE"=mse,"SEMSE"=semse,"RMSE"=rmse,"SE"=se,"MAE"=mae,"MAPE"=mape))
+}
+```
+
+
+******
+
+# Modelling - GAM
+
+Generalized Additive Model (GAM) is a model that assumes that the explanatory variable may not have a linear relationship with the response variable. For each independent variable, GAM will create a spline instead of only weighting them linearly in Generalized Linear Model (GLM). GAM creates partitions for a certain variable and within each partition, GAM fits a function for that suits the respective variable and continues doing so in the next partition, in which the functions combined as a result is called a spline. GAM does the process of fitting splines automatically. However, splines will not be created for categorical variables.
+
+In the `gam` library in R, we can determine a variable to be fitted with a spline by using the `s()` function during the modelling.
+
+
+## Model Assumptions
+
+The GAM model assumes that there are no interactions between independent variables. Therefore, an independent variable must not be a linear combination of other independent variables. This will be evaluated using inner variance inflation factor (VIF) which measures multicollinearity of independent variables.
+
+
+## Modelling Preparation
+As previously mentioned, we will assume that all numerical variables do not have a linear relationship with the price and add the `s()` for the modelling.
+```{r}
+# Preparing outcome and independent variables for the models
+# We also transform the outcome with logarithm transformation.
+outcome <- "log(Price)"
+s.numerical <- paste("s(", numerical, ")", sep = "")
+
+(f <- as.formula(paste(outcome, 
+                      paste(c(s.numerical, categorical), collapse = "+"),
+                      sep = "~")))
+(f2 <- as.formula(paste(outcome, 
+                      paste(c(s.numerical, categorical, "Cluster"), collapse = "+"),
+                      sep = "~")))
+```
+
+
+## GAM Without Clusters
+```{r}
+mod_gam1 <- gam(f, data=train)
+summary(mod_gam1)
+```
+
+```{r out.width=c('50%', '50%'), fig.show='hold'}
+plot(mod_gam1)
+```
+
+From the spline plots above, almost all of the numerical independent variables are visibly nonlinear. This can be observed through the spline plot lines that are curvy and have one or more inflection points such Landsize, BuildingArea, and EffAge. Although Distance does not seem to have an inflection point on the spline plot, it is still visible that it does not have a straight linear line.
+
+
+### Model Evaluation 1 - AIC & Residual Analysis
+```{r}
+mod_gam1$aic
+bin_gam = eval.train_init(mod_gam1, train, outliers = TRUE)
+train_gam = eval.train_update(mod_gam1, train, bin_gam)
+```
+
+In the model's summary, that the model received an AIC value of -857.1206, which will be used to compare with the next model with removed outliers in the train set.
+
+From the graph above, we can see from the first graph that the predictions made by the model are spread around the y=x line, which shows that the predictions are close to the actual values. However, we can see that there are a couple of wrong predictions. The second graph highlights these wrong outcomes as we can see that there are some residuals that are far from the predictions. Residuals are the difference between each predicted data and the actual value of the data. The standardized residuals with the `rstandard()` function will be evaluated and data whose corresponding residual values are greater than 3 will be removed in the following step.
+
+
+### Remodelling With New Train Set
+```{r}
+mod_gam1.final <- gam(f, data = train_gam)
+summary(mod_gam1.final)
+```
+
+```{r out.width=c('50%', '50%'), fig.show='hold'}
+plot(mod_gam1.final)
+```
+
+These spline plots as a result of fitting with the outliers removed are consistent with the previous spline plots. 
+
+
+### Model Evaluation 2 - New AIC, Residual Analysis, and Error Analysis
+```{r}
+data.frame("Outliers Not Removed" = mod_gam1$aic, 
+           "Outliers Removed" = mod_gam1.final$aic)
+
+eval.train_init(mod_gam1.final, train_gam, outliers = FALSE)
+```
+
+After we have removed the outliers in the training set, we can see that there is a highly significant decrease in the AIC of the model. This means that the model is now performing much better with outliers removed.
+
+From the graphs, it can be observed that the predictions are now closer the actual values and the residuals are also closer to 0. It is also worth noting that there are no significant patterns present in the residuals vs prediction plot; the residuals are randomly distributed.
+
+Furthermore, the normality of the model's residuals will be analyzed.
+```{r out.width=c('50%', '50%'), fig.show='hold'}
+hist(mod_gam1.final$residuals, main="Residuals")
+qqnorm(mod_gam1.final$residuals, main="QQ plot"); qqline(mod_gam1.final$residuals)
+```
+
+It can also be observed from the histogram and qqplot that the residuals resemble a normal distribution.
+
+Now, we are going to analyze the error in the predictions of the train set. We will also compare the metrics with the previous model with outliers not removed.
+```{r}
+merge(stack(comp(exp(mod_gam1$fitted.values), exp(mod_gam1$y))),
+      stack(comp(exp(mod_gam1.final$fitted.values), exp(mod_gam1.final$y))),
+      by = "ind", sort = FALSE)
+```
+
+From the results, we can conclude that out of the 4078 data in the train set with outliers removed, the model receives an RMSE of 261981.666 and an average absolute error of 15.927%. These values show an increase in performance from the previous model with outliers intact. This can be concluded from the significant decrease in RMSE and MAPE values.
+
+
+### Multicollinearity
+```{r}
+vif(mod_gam1.final)
+```
+
+From the VIF scores, we can see that almost all numerical variables have a relatively small VIF with values below 4. Therefore, we can conclude that they are not linear combinations of other independent variables. However, Distance received a VIF of 6.675 which is relatively more than other VIF values. Since Distance do not seem to be a linear combination of other numerical variables and its VIF value does not have a relatively big difference with other VIF values, Distance can still be considered to be used in this model. On the other hand, the VIF values of the categorical variables will be ignored.
+
+
+### Prediction and Error Analysis
+```{r}
+pred_gam1 = predict(mod_gam1.final, newdata = test, type = "response")
+```
+
+```{r}
+eval_gam1 = eval.test(pred_gam1, test$Price)
+```
+
+From the graph, we can see that there are some predictions that are far away from the y=x line, which means that the model has some inaccurate predictions in the test set. The second graph further highlights these findings. 
+
+From the metrics results, we can conclude that out of the 1024 data in the test set, the model successfully predicted the prices with RMSE of 287900.1 and average absolute error of 16.71%. These metrics and the model's AIC will be kept for further comparison with the results from other models.
+
+
+## GAM With Clusters
+```{r}
+mod_gam2 <- gam(f2, data=train)
+summary(mod_gam2)
+```
+
+```{r out.width=c('50%', '50%'), fig.show='hold'}
+plot(mod_gam2)
+```
+
+From the spline plots above, almost all of the numerical independent variables are visibly nonlinear. This can be observed through the spline plot lines that are curvy and have one or more inflection points such Landsize, BuildingArea, and EffAge. Although Distance does not seem to have an inflection point on the spline plot, it is still visible that it does not have a straight linear line. The spline plots are consistent with the previous model without clusters. However there are some differences such in the curves, a visible one being the Landsize.
+
+
+### Model Evaluation 1 - AIC & Residual Analysis
+```{r}
+mod_gam2$aic
+bin_gam = eval.train_init(mod_gam2, train, outliers = TRUE)
+train_gam = eval.train_update(mod_gam2, train, bin_gam)
+```
+
+In the model's summary, that the model received an AIC value of -3035.398, which will be used to compare with the next model with removed outliers in the train set.
+
+From the graph above, we can see from the first graph that the predictions made by the model are spread around the y=x line, which shows that the predictions are close to the actual values. However, we can see that there are a couple of wrong predictions. The second graph highlights these wrong outcomes as we can see that there are some residuals that are far from the predictions. Residuals are the difference between each predicted data and the actual value of the data. The standardized residuals with the `rstandard()` function will be evaluated and data whose corresponding residual values are greater than 3 will be removed in the following step.
+
+
+### Remodelling With New Train Set
+```{r}
+mod_gam2.final <- gam(f2, data = train_gam)
+summary(mod_gam2.final)
+```
+
+```{r out.width=c('50%', '50%'), fig.show='hold'}
+plot(mod_gam2.final)
+```
+
+These spline plots as a result of fitting with the outliers removed are consistent with the previous spline plots. Additionally, Landsize has a steep declining line, unlike the previous plot.
+
+
+### Model Evaluation 2 - New AIC, Residual Analysis, and Error Analysis
+```{r}
+data.frame("Outliers Not Removed" = mod_gam2$aic, 
+           "Outliers Removed" = mod_gam2.final$aic)
+
+eval.train_init(mod_gam2.final, train_gam, outliers = FALSE)
+```
+
+After we have removed the outliers in the training set, we can see that there is a highly significant decrease in the AIC of the model. This means that the model is now performing much better with outliers removed.
+
+From the graphs, it can be observed that the predictions are now closer the actual values and the residuals are also closer to 0. Moreover, there seems to be a pattern in the residuals. Further investigation can be considered on this issue.
+
+Furthermore, the normality of the model's residuals will be analyzed.
+```{r out.width=c('50%', '50%'), fig.show='hold'}
+hist(mod_gam2.final$residuals, main="Residuals")
+qqnorm(mod_gam2.final$residuals, main="QQ plot"); qqline(mod_gam2.final$residuals)
+```
+
+It can also be observed from the histogram and qqplot that the residuals resemble a normal distribution.
+
+Now, we are going to analyze the error in the predictions of the train set. We will also compare the metrics with the previous model with outliers not removed.
+```{r}
+merge(stack(comp(exp(mod_gam2$fitted.values), exp(mod_gam2$y))),
+      stack(comp(exp(mod_gam2.final$fitted.values), exp(mod_gam2.final$y))),
+      by = "ind", sort = FALSE)
+```
+
+From the results, we can conclude that out of the 4082 data in the train set with outliers removed, the model receives an RMSE of 187181.731 and an average absolute error of 12.383%. These values show an increase in performance from the previous model with outliers intact. This can be concluded from the significant decrease in RMSE and MAPE values.
+
+
+### Multicollinearity
+```{r}
+vif(mod_gam2.final)
+```
+
+From the VIF scores, we can see that almost all numerical variables have a relatively small VIF with values below 4. Therefore, we can conclude that they are not linear combinations of other independent variables. However, Distance received a VIF of 7.035 which is relatively more than other VIF values. Since Distance do not seem to be a linear combination of other numerical variables and its VIF value does not have a relatively big difference with other VIF values, Distance can still be considered to be used in this model. On the other hand, the VIF values of the categorical variables will be ignored.
+
+
+### Prediction and Error Analysis
+```{r}
+pred_gam2 = predict(mod_gam2.final, newdata = test, type = "response")
+```
+
+```{r}
+eval_gam2 = eval.test(pred_gam2, test$Price)
+```
+
+From the graph, we can see that there are some predictions that are far away from the y=x line, which means that the model has some inaccurate predictions in the test set. The second graph further highlights these findings.
+
+From the results, we can conclude that out of the 1024 data in the test set, the model successfully predicted the prices with RMSE of 193924.5 and average absolute error of 12.75%. These metrics and the model's AIC will be kept for further comparison with the results from other models.
+
+
+******
+
+# Modelling - GBM
+
+Gradient boosting method (GBM) is a tree-based machine learning algorithm which combines the predictions of multiple decision trees generated into a certain final prediction. The generation of trees are done iteratively based on the residuals or errors from the previous iteration. 
+
+
+## Model Assumption
+
+The GBM model may have an assumption that the encoded integer value for each variable has an ordinal relation. Therefore, the selection of clusters in the previous section may have been correct. Other than that, the GBM model does not require any other model assumptions.
+
+
+## Train-Eval Split for Cross Validation
+
+For the gradient boosting method model, a 10-fold cross validation will be used. Stratified sampling will be applied in the train-test set split with `createDataPartition()` with a split ratio of 80:20. Folds for cross validation in the train set will be done with `createFolds()` with an amount of 10 folds.
+```{r}
+set.seed(1)
+n.folds <- 10
+folds <- createFolds(y=train$Cluster, k=n.folds, list=T, returnTrain=F)
+```
+
+Parameter optimization will be done with 10-Fold Cross Validation. The parameters to be tuned include `n.trees` and `depth`. Moreover, the GBM model will be created using the parameters `shrinkage=0.01` and `n.minobsinnode=5`.
+```{r}
+try_ntrees = c(5000, 10000, 20000, 30000, 50000)
+try_depths = c(3,5,7,9)
+```
+
+
+## GBM Without Clusters
+### Cross Validation
+```{r}
+cv_MAPE1 <- NULL
+cv_MAPE1 <- matrix(nrow = length(try_ntrees), ncol = length(try_depths))
+rownames(cv_MAPE1) = try_ntrees
+colnames(cv_MAPE1) = try_depths
+```
+
+```
+# Note: this code will not be run for knitting purposes
+# Results are presented in the next chunk
+tic("GBM 1 CV")
+for (n in try_ntrees){
+  MAPE.ave <- NULL;
+    for (d in try_depths){
+    MAPE <- NULL; i=1
+    for(fold in folds){
+      print(paste(n,d,i)); i=i+1
+      ## GBM
+      mod = gbm(log(Price)~.-Cluster, data=train[-fold, ],
+                n.trees=n, interaction.depth=d, 
+                shrinkage=0.01, n.minobsinnode=5, verbose=F)
+      
+      ## Predicting in the validation set
+      pred = predict(mod, newdata=train[fold, ], type="response")
+      
+      MAPE = c(MAPE, comp(exp(pred), train[fold, ]$Price)$MAPE)
+      
+      ## Freeing Memory
+      rm(mod); gc()
+    }
+    MAPE.ave = c(MAPE.ave, mean(MAPE));
+  }
+  cv_MAPE1[paste(n), ] = MAPE.ave
+  print(cv_MAPE1[paste(n), ])
+}
+toc()
+```
+
+```{r}
+# Cross Validation GBM 1 Results
+# Normal Price - Runtime 4.31403 hours
+cv_MAPE1["5000", ] <- c(15.50530,15.20302,15.10528,15.03173)
+cv_MAPE1["10000", ] <- c(15.37814,15.19685,15.07715,15.12083)
+cv_MAPE1["20000", ] <- c(15.41938,15.37908,15.44239,15.52413)
+cv_MAPE1["30000", ] <- c(15.55725,15.50775,15.62089,15.68667)
+cv_MAPE1["50000", ] <- c(15.84067,15.84754,15.93141,15.94548)
+avg_MAPE11 = mean(cv_MAPE1)
+print(cv_MAPE1)
+
+# Log Price - Runtime 3.950008 hours
+cv_MAPE1["5000", ] <- c(14.51370,14.19185,14.09420,14.11684)
+cv_MAPE1["10000", ] <- c(14.27702,14.17983,14.19976,14.27024)
+cv_MAPE1["20000", ] <- c(14.28147,14.37412,14.48387,14.56592)
+cv_MAPE1["30000", ] <- c(14.36344,14.56086,14.71708,14.76850)
+cv_MAPE1["50000", ] <- c(14.59353,14.82618,14.97162,15.00474)
+avg_MAPE12 = mean(cv_MAPE1)
+print(cv_MAPE1)
+
+data.frame("Without Transformation" = avg_MAPE11, 
+           "Log Transform" = avg_MAPE12)
+
+```
+
+The cross validation was done twice for a model without transformation and with the logarithm transform on Price. The MAPE was calculated based on the non-transformed variable. It was found that the model performs better on average in the cross validation with the log transformation.
+
+```{r}
+cv_MAPE1 = melt(cv_MAPE1)
+cv_MAPE1$Var1 = as.factor(cv_MAPE1$Var1)
+cv_MAPE1$Var2 = as.factor(cv_MAPE1$Var2)
+```
+
+```{r}
+ggplot(cv_MAPE1, aes(x = Var2, y = value)) + 
+  geom_line(aes(color = Var1, group = Var1)) + 
+  geom_point()+
+  ggtitle("Parameter vs MAPE") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  labs(x = "Depth", y = "MAPE", color = "ntree")
+```
+
+From the graph above, there are some patterns that could be seen. In the case of ntree=5000, MAPE decreases as the number of depth increases. However, the MAPE increases at depth=9. The same does not hold for other ntrees since the MAPE increases as the depth increases for most cases. Furthermore, MAPE also tends to increase with the amount of ntree. This may be due to overfitting with too many trees generated.
+
+Since an ideal model would be a model with less complexity and high accuracy, the parameters used will be n.trees=5000 and interaction.depth=7.
+
+```{r}
+best_ntree1 = 5000
+best_depth1 = 7
+```
+
+
+### Modelling with Tuned Parameters
+
+A model will now be created with optimized parameters obtained from the cross validation.
+```{r}
+tic("GBM 1 Best")
+set.seed(1)
+mod_gbm1_best = gbm(log(Price)~.-Cluster, data=train,
+                n.trees=best_ntree1, interaction.depth=best_depth1, 
+                shrinkage=0.01, n.minobsinnode=5, verbose=F)
+toc()
+```
+
+Model's prediction on the train set is as follows.
+```{r}
+yhat = predict(mod_gbm1_best, newdata=train, type="response")
+comp(exp(yhat), train$Price)
+```
+
+The model received an RMSE of 163529 and MAPE of 9.663%. These values indicate a good performance of the model.
+
+
+### Prediction and Model Evaluation
+```{r}
+## Predicting the test set
+pred_gbm1 = predict(mod_gbm1_best, newdata=test, type="response")
+```
+
+```{r}
+eval_gbm1 = eval.test(pred_gbm1, test$Price)
+```
+
+The predictions of the model receive an RMSE value of 251751.4 and MAPE value of 14.005%. These results indicate a good performance in the model and will be compared with the results from other models. 
+
+From the residual plots, there are some points far from the lines which indicate that the model did not accurately predict the data with the corresponding residual. However, there does not seem to be any pattern in the residuals and therefore it is random.
+
+```{r}
+(imp_gbm1 <- summary(mod_gbm1_best))
+```
+
+From the variable importance, the three main variables that have a high importance towards the dependent variable include CouncilArea, BuildingArea, and EffAge. Additionally, number of rooms, car parking lots, and region of the house received the lowest variable importance. These findings are consistent with the exploratory data analysis, where it was found that BuildingArea and EffAge has the highest correlation values. On the other hand, Regionname may have become unimportant as it also explains the location of the house, which is similar to CouncilArea. This may result in the redundancy of independent variables.
+
+
+## GBM With Clusters
+
+### Cross Validation
+```{r}
+cv_MAPE2 <- NULL
+cv_MAPE2 <- matrix(nrow = length(try_ntrees), ncol = length(try_depths))
+rownames(cv_MAPE2) = try_ntrees
+colnames(cv_MAPE2) = try_depths
+```
+
+```
+# Note: this code will not be run for knitting purposes
+# Results are presented in the next chunk
+tic("GBM 2 CV")
+for (n in try_ntrees){
+  MAPE.ave <- NULL;
+    for (d in try_depths){
+    MAPE <- NULL; i=1
+    for(fold in folds){
+      print(paste(n,d,i)); i=i+1
+      ## GBM
+      mod = gbm(log(Price)~., data=train[-fold, ],
+                n.trees=n, interaction.depth=d, 
+                shrinkage=0.01, n.minobsinnode=5, verbose=F)
+      
+      ## Predicting in the validation set
+      pred = predict(mod, newdata=train[fold, ], type="response")
+      
+      MAPE = c(MAPE, comp(exp(pred), train[fold, ]$Price)$MAPE)
+      
+      ## Freeing Memory
+      rm(mod); gc()
+    }
+    MAPE.ave = c(MAPE.ave, mean(MAPE));
+  }
+  cv_MAPE2[paste(n), ] = MAPE.ave
+  print(cv_MAPE2[paste(n), ])
+}
+toc()
+```
+
+```{r}
+# Cross Validation GBM 2 Results
+# Normal Price - Runtime 5.090928 hours
+cv_MAPE2["5000", ] <- c(12.04435,11.74558,11.60044,11.53538)
+cv_MAPE2["10000", ] <- c(11.87802,11.70784,11.65690,11.66012)
+cv_MAPE2["20000", ] <- c(11.82695,11.83290,11.88897,11.98451)
+cv_MAPE2["30000", ] <- c(11.93501,12.00012,12.07607,12.16454)
+cv_MAPE2["50000", ] <- c(12.14636,12.27087,12.30897,12.33763)
+avg_MAPE21 = mean(cv_MAPE2)
+print(cv_MAPE2)
+
+# Log Price - Runtime 3.968056 hours
+cv_MAPE2["5000", ] <- c(11.56440,11.30679,11.25243,11.24295)
+cv_MAPE2["10000", ] <- c(11.43970,11.30901,11.34839,11.39803)
+cv_MAPE2["20000", ] <- c(11.49090,11.49785,11.62484,11.70467)
+cv_MAPE2["30000", ] <- c(11.54603,11.67585,11.79794,11.89088)
+cv_MAPE2["50000", ] <- c(11.76255,11.92083,12.02956,12.05461)
+avg_MAPE22 = mean(cv_MAPE2)
+print(cv_MAPE2)
+
+data.frame("Without Transformation" = avg_MAPE21, 
+           "Log Transform" = avg_MAPE22)
+
+```
+
+The cross validation was done twice for a model without transformation and with the logarithm transform on Price. The MAPE was calculated based on the non-transformed variable. It was found that the model performs better on average in the cross validation with the log transformation. These are consistent with the previous GBM model
+
+```{r}
+cv_MAPE2 = melt(cv_MAPE2)
+cv_MAPE2$Var1 = as.factor(cv_MAPE2$Var1)
+cv_MAPE2$Var2 = as.factor(cv_MAPE2$Var2)
+```
+
+```{r}
+ggplot(cv_MAPE2, aes(x = Var2, y = value)) + 
+  geom_line(aes(color = Var1, group = Var1)) + 
+  geom_point()+
+  ggtitle("Parameter vs MAPE") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  labs(x = "Depth", y = "MAPE", color = "ntree")
+```
+
+From the graph above, there are some patterns that could be seen. In the case of ntree=5000, MAPE decreases as the number of depth increases. The same does not hold for other ntrees since the MAPE increases as the depth increases for most cases. Furthermore, MAPE also tends to increase with the amount of ntree. This may be due to overfitting with too many trees generated. These results are also similar to the previous GBM cross validation.
+
+Since an ideal model would be a model with less complexity and high accuracy, the parameters used will be n.trees=5000 and interaction.depth=9.
+
+```{r}
+best_ntree2 = 5000
+best_depth2 = 9
+```
+
+
+### Modelling with Tuned Parameters
+
+A model will now be created with optimized parameters obtained from the cross validation.
+```{r}
+tic("GBM 2 Best")
+set.seed(1)
+mod_gbm2_best = gbm(log(Price)~., data=train,
+                n.trees=best_ntree2, interaction.depth=best_depth2, 
+                shrinkage=0.01, n.minobsinnode=5, verbose=F)
+toc()
+```
+
+Model's prediction on the train set is as follows.
+```{r}
+yhat = predict(mod_gbm2_best, newdata=train, type="response")
+comp(exp(yhat), train$Price)
+```
+
+The model received an RMSE of 113270.9 and MAPE of 7.045%. These values might indicate a good performance of the model.
+
+
+### Prediction and Model Evaluation
+```{r}
+## Predicting the test set
+pred_gbm2 = predict(mod_gbm2_best, newdata=test, type="response")
+```
+
+```{r}
+eval_gbm2 = eval.test(pred_gbm2, test$Price)
+```
+
+The predictions of the model receive an RMSE value of 178512.6 and MAPE value of 10.791%. These results indicate a good performance in the model and will be compared with the results from other models. 
+
+From the residual plots, there are some points far from the lines which indicate that the model did not accurately predict the data with the corresponding residual. Additionally, patterns can be found in the residuals, just like the results found in the GAM model with the Cluster variable. Further investigation can be done on this problem.
+
+```{r}
+(imp_gbm2 <- summary(mod_gbm2_best))
+```
+
+From the variable importance, the Cluster variable dominates its importance in comparison to other variables. The next variables have the same order of importance with the variable importance obtained from the previous GBM model. These variable importance results further highlights the affect of clustering in modelling.
+
+
+******
+
+# Model Comparison
+
+The metrics from the predictions will be compared in this section.
+```{r}
+cbind("GAM Without Clustering"=eval_gam1, 
+      "GAM With Clustering"=eval_gam2, 
+      "GBM Without Clustering"=eval_gbm1, 
+      "GBM With Clustering"=eval_gbm2)
+```
+
+From the results above, the distinction in performance between the models is clearly shown. Models that were fitted without clustering perform worse than models with clusters as an independent variable. This can be seen through the lower RMSE and MAPE values. As a comparison, the average of the price in the test set is 1116454.  The same also holds in all other metrics. Therefore, it can be assumed that clustering before modelling may increase the performance of a model.
+
+Furthermore, similar contrast of GAM and GBM models can also be inferred from these metrics. GAM models tend to perform poorly than GBM models. Both RMSE and MAPE models in both with and without the clustering variable are lower in GBM. GBM also receives better indication of performance based the other metrics as well. Therefore, GBM, a tree based model, performs better than GAM, a linear based model, in the case of this dataset.
+
+
+******
+
+# Conclusion
+
+In conclusion, this project has explored the Melbourne Housing Snapshot dataset, transformed the dependent variable with log transformation, created clustering from the data, and modelled using the transformed dependent variable and clusters. It was found that the transformation and clustering affected the models' performance positively. The models used include GAM and GBM with GBM being a better model for this dataset.
+
+From the variable importance, it was found out that the council area, building area, and age of the house highly affects the house's price. Therefore, real estate investors and people who are interested in buying houses should consider taking these factors into context before buying real estates.
+
+For future studies, there could be more investigation on the patterns that exist in the residuals. Variable selection can also be done with ridge regression or lasso regression and feature engineering from the independent variables.
