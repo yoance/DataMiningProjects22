@@ -1,0 +1,129 @@
+---
+title: "House Price Prediction Project"
+author: "Yohan"
+date: "1/30/2022"
+output:
+  html_document:
+    code_folding: show
+    number_sections: yes
+    toc: yes
+    toc_float: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Loading Library
+Library used in this study case is `tidyverse` and `caret`.
+```{r, echo=TRUE}
+library(tidyverse)
+library(caret)
+```
+
+# Data Description
+Data used in this study case are house sales data. The dataset contains x variables.
+
+## Data Loading and Prerequisites
+Data saved in the CSV files will be loaded using the function `read.csv`. A seed will also be set for the project so that we will obtain the same results in each run.
+```{r, echo=TRUE}
+rm(list=ls())   # clean up workspace
+set.seed(1)
+sales <- read.csv('salesData19.csv')
+head(sales)
+```
+
+# EDA and Data Cleaning
+We shall now explore and clean the data.
+```{r, echo=TRUE}
+summary(sales)
+
+# Dropping ID variable since we have the same values in the data frame's index
+sales <- subset(sales, select = -c(ID))
+
+# Changing SALEDT variable into date format in R and renaming the column
+sales$SALEDT <- as.Date(sales$SALEDT)
+names(sales)[names(sales) == 'SALEDT'] <- 'DATE'
+
+# Formatting categorical variables as factors
+categorical <- c('City', 
+                 'Province', 
+                 'BSMT',
+                 'HEATSYS',
+                 'ATTIC',
+                 'GRADE',
+                 'Style')
+sales[, categorical] = lapply(sales[, categorical], factor)
+
+# Alternatively,
+# sales$GRADE <- ordered(sales$GRADE)
+# sales$Style <- as.factor(sales$Style)
+
+summary(sales)
+```
+
+
+# Linear Regression Model
+We are going to create 2 multiple linear regression models to predict the house prices. Therefore, `Price` will be the dependent variable for both linear models. Models will be created using the `lm` function and will later be evaluated.
+
+## Model 1
+Independent variables: SQFT, FLR1AREA, SFLA, EFF_AGE, GRADE
+
+### Train Test Splitting 1
+We are now ready to split the data set into train and test set. The splitting will be done using `CreateDataPartition` function from the `caret` package. The train-test split ratio will be 80:20 and stratified splitting will be done based on `GRADE` as it is the categorical independent variable which will be modeled in Model 1.
+```{r, echo=TRUE}
+train.idx.1 <- createDataPartition(y = sales$GRADE, p = 0.8, list = FALSE)
+train.1 <- sales[train.idx.1, ]
+test.1 <- sales[-train.idx.1, ]
+
+# Checking the proportion of the GRADE categorical variable
+# in the train and test set in comparison to the original data set
+rbind("Data Set" = prop.table(table(sales$GRADE)),
+      "Train" = prop.table(table(train.1$GRADE)),
+      "Test" = prop.table(table(test.1$GRADE)))
+```
+
+### Linear Model 1
+We will now create the first model based on the given dependent and independent variables.
+```{r, echo=TRUE}
+lm.1 <- lm(Price ~ SQFT + FLR1AREA + SFLA + EFF_AGE + GRADE, data = train.1)
+prices.1 <- predict(lm.1, test.1)
+
+summary(lm.1)
+```
+## Model 2
+Independent variables: SQFT, FLR1AREA, SFLA, EFF_AGE, Style
+
+### Train Test Splitting 2
+Just as we have done previously, we will split the train and test set with train-test split ratio of 80:20. This time, stratified splitting will be done based on `Style` as it is the categorical independent variable which will be modeled in Model 2.
+```{r, echo=TRUE}
+train.idx.2 <- createDataPartition(y = sales$Style, p = 0.8, list = FALSE)
+train.2 <- sales[train.idx.2, ]
+test.2 <- sales[-train.idx.2, ]
+
+# Checking the proportion of the Style categorical variable
+# in the train and test set in comparison to the original data set
+rbind("Data Set" = prop.table(table(sales$Style)),
+      "Train" = prop.table(table(train.2$Style)),
+      "Test" = prop.table(table(test.2$Style)))
+```
+
+### Linear Model 2
+We are now going to create the second model based on the given dependent and independent variables.
+```{r, echo=TRUE}
+lm.2 <- lm(Price ~ SQFT + FLR1AREA + SFLA + EFF_AGE + Style, data = train.2)
+prices.2 <- predict(lm.2, test.2)
+
+summary(lm.2)
+```
+
+## Linear Models Evaluation
+We are now going to evaluate the 2 models we have created by calculating the MSE of each models.
+```{r, echo=TRUE}
+mse.1 <- mean((test.1$Price - prices.1)^2)
+mse.2 <- mean((test.2$Price - prices.2)^2)
+
+data.frame("Model 1" = mse.1, "Model 2" = mse.2)
+```
+
+From the results above, we can conclude that the first model is better than the second model. This is due to its lower MSE when compared to Model 2's MSE. In other words, Model 1 is more accurate than Model 2. We can also see that the same conclusion can be obtained by evaluating the adjusted R^2 of each model, in which model 1 has a greater R^2 value in comparison to model 2.
